@@ -27,8 +27,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from model_client import HttpModelClient as _HttpModelClient
 from session_auth import SessionManager, Vault, extract_bearer
 
 ROOT = Path(__file__).parent.resolve()
@@ -56,12 +57,18 @@ def _security_headers() -> dict[str, str]:
         "Referrer-Policy": "no-referrer",
         "Content-Security-Policy": (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
             "frame-ancestors 'none'"
         ),
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Resource-Policy": "same-origin",
         "Cache-Control": "no-store",
     }
 
@@ -91,7 +98,10 @@ class GatewayState:
         debug_mode: bool,
         is_unlocked: Callable[[], bool],
         rag_enabled: bool = False,
+        rag_max_chars: int = 6000,
+        rag_top_k: int = 3,
         persistence_enabled: bool = False,
+        db_path: Path | None = None,
         vault: Vault | None = None,
         insecure_mode: bool = False,
         model_name: str = "bonsai",
@@ -114,7 +124,10 @@ class GatewayState:
         self.debug_mode = debug_mode
         self.is_unlocked = is_unlocked
         self.rag_enabled = rag_enabled
+        self.rag_max_chars = max(0, int(rag_max_chars))
+        self.rag_top_k = max(1, min(int(rag_top_k), 20))
         self.persistence_enabled = persistence_enabled
+        self.db_path = Path(db_path) if db_path is not None else None
         self.vault = vault
         self.insecure_mode = insecure_mode
         self.model_name = model_name
@@ -138,6 +151,7 @@ class GatewayState:
         self.permissions = permissions
         self.subagents_enabled = subagents_enabled
         self.subagent_index = subagent_index
+        self.rag_lock = threading.Lock()
         self.rate_limit = _RateBucket(max_requests=90, window_s=60.0)
         self.chat_rate_limit = _RateBucket(max_requests=30, window_s=60.0)
         self.unlock_rate_limit = _RateBucket(max_requests=5, window_s=60.0)
@@ -171,34 +185,6 @@ class GatewayState:
 
     def issue_bootstrap_token(self) -> str:
         return self.sessions.issue()
-
-
-class _HttpModelClient:
-    """Minimal OpenAI-compatible client against llama-server via gateway llm_base."""
-
-    def __init__(self, llm_base: str, model: str = "bonsai"):
-        self.llm_base = llm_base.rstrip("/")
-        self.model = model
-
-    def chat_completion(self, model: str, messages: list[dict]) -> dict:
-        payload = json.dumps(
-            {
-                "model": model or self.model,
-                "messages": messages,
-                "stream": False,
-                "temperature": 0.7,
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.llm_base}/v1/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        content = data["choices"][0]["message"]["content"]
-        return {"content": content, "raw": data}
 
 
 def _confined_index_path(source: str | Path) -> Path | None:
@@ -517,6 +503,32 @@ def make_handler(state: GatewayState):
                 self._handle_tools_get()
                 return
 
+            if path == "/api/rag/status":
+                if not self._require_auth():
+                    return
+                self._handle_rag_status_get()
+                return
+
+            if path == "/api/rag/sources":
+                if not self._require_auth():
+                    return
+                self._handle_rag_sources_get(include_deleted=False)
+                return
+
+            if path == "/api/rag/query":
+                if not self._require_auth():
+                    return
+                if not self._require_rate():
+                    return
+                self._handle_rag_query_get(parsed)
+                return
+
+            if path == "/api/experience/status":
+                if not self._require_auth():
+                    return
+                self._handle_experience_status_get()
+                return
+
             # Static files (public)
             self._serve_static(path)
 
@@ -557,6 +569,31 @@ def make_handler(state: GatewayState):
                 if not self._require_rate():
                     return
                 self._handle_rag_post()
+                return
+            if path == "/api/rag/query":
+                if not self._require_rate():
+                    return
+                self._handle_rag_query_post()
+                return
+            if path == "/api/rag/index":
+                if not self._require_rate():
+                    return
+                self._handle_rag_index_post()
+                return
+            if path == "/api/rag/sources/delete":
+                if not self._require_rate():
+                    return
+                self._handle_rag_delete_source_post()
+                return
+            if path == "/api/rag/maintenance":
+                if not self._require_rate():
+                    return
+                self._handle_rag_maintenance_post()
+                return
+            if path == "/api/experience/purge":
+                if not self._require_rate():
+                    return
+                self._handle_experience_purge_post()
                 return
             if path in ("/api/chat", "/api/agent"):
                 if not self._require_rate(state.chat_rate_limit):
@@ -750,9 +787,12 @@ def make_handler(state: GatewayState):
                             {"error": "blocked_by_hook", "message": decision.reason},
                         )
                         return
+                from persona import load_identity, resolve_persona_tools
                 from subagents import run_subagent
                 from tools import get_toolbox
 
+                identity = load_identity()
+                persona_key = (identity or {}).get("persona") or "investigador"
                 client = _HttpModelClient(state.llm_base, model=state.model_name)
                 result = run_subagent(
                     agent,
@@ -762,6 +802,7 @@ def make_handler(state: GatewayState):
                     toolbox=get_toolbox(),
                     hooks=state.hooks,
                     permissions=state.permissions,
+                    persona_tools=resolve_persona_tools(persona_key),
                 )
                 self._json(200, result)
             except ValueError as e:
@@ -893,106 +934,427 @@ def make_handler(state: GatewayState):
             except Exception as e:
                 self._json(500, {"error": str(e)})
 
-        def _handle_rag_post(self) -> None:
+        # -- RAG ---------------------------------------------------------
+
+        def _feature_disabled(self, feature: str, message: str) -> None:
+            self._json(
+                503,
+                {
+                    "error": "feature_unavailable",
+                    "feature": feature,
+                    "message": message,
+                },
+            )
+
+        def _rag_memory(self):
+            from local_memory import get_memory
+
+            return get_memory(state.db_path)
+
+        def _rag_sources_payload(self, *, include_deleted: bool = False) -> None:
+            mem = self._rag_memory()
+            sources = mem.list_sources(include_deleted=include_deleted)
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "rag_enabled": True,
+                    "indexed": len(sources),
+                    "sources": sources,
+                    "files": sources,
+                },
+            )
+
+        def _handle_rag_status_get(self) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
             try:
-                if not state.rag_enabled:
-                    self._json(
-                        503,
-                        {
-                            "error": "feature_unavailable",
-                            "feature": "rag",
-                            "message": "RAG is experimental and disabled in this build.",
-                        },
-                    )
-                    return
-                from local_memory import DOCS_DIR as MEM_DOCS, get_memory, retrieve
-
-                data = self._read_json()
-                action = data.get("action", "query")
-                mem = get_memory()
-
-                if action == "list":
-                    indexed = mem.list_indexed()
-                    self._json(
-                        200,
-                        {
-                            "ok": True,
-                            "rag_enabled": state.rag_enabled,
-                            "indexed": len(indexed),
-                            "files": indexed,
-                        },
-                    )
-                    return
-
-                if action == "index":
-                    source = data.get("path") or str(MEM_DOCS)
-                    confined = _confined_index_path(source)
-                    if confined is None:
-                        self._json(
-                            403,
-                            {
-                                "error": "path_forbidden",
-                                "message": (
-                                    "RAG index only under docs/, workspace/, "
-                                    "or data/KAYAB_DATASETS"
-                                ),
-                            },
-                        )
-                        return
-                    stats = mem.index_docs(confined)
-                    self._json(200, {"ok": True, **stats})
-                    return
-
-                if action == "query":
-                    query = data.get("query", "")
-                    if not query:
-                        self._json(400, {"error": "query required"})
-                        return
-                    top_k = min(int(data.get("top_k", 3)), 20)
-                    results = mem.search(query, top_k=top_k)
-                    context = retrieve(query, top_k=top_k)
-                    self._json(
-                        200,
-                        {
-                            "ok": True,
-                            "context": context,
-                            "results": results,
-                            "rag_enabled": True,
-                        },
-                    )
-                    return
-
-                self._json(400, {"error": f"unknown action: {action}"})
-            except ValueError as e:
-                code = 413 if "exceeds" in str(e) else 400
-                self._json(code, {"error": str(e)})
-            except Exception as e:
-                self._json(500, {"error": str(e)})
-
-        def _handle_experience_drain(self) -> None:
-            if not state.persistence_enabled:
                 self._json(
-                    503,
+                    200,
                     {
-                        "error": "feature_unavailable",
-                        "feature": "persistence",
-                        "message": "Experience persistence is experimental and disabled.",
+                        "ok": True,
+                        "enabled": True,
+                        **self._rag_memory().status(),
                     },
+                )
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _handle_rag_sources_get(self, *, include_deleted: bool) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                self._rag_sources_payload(include_deleted=include_deleted)
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _do_rag_query(
+            self,
+            query: str,
+            top_k,
+            *,
+            source_type: str | None = None,
+            path_prefix: str | None = None,
+        ) -> None:
+            query = str(query or "").strip()
+            if not query:
+                self._json(400, {"error": "query required"})
+                return
+            if len(query) > 2000:
+                self._json(413, {"error": "query exceeds 2000 characters"})
+                return
+            try:
+                k = int(top_k if top_k is not None else state.rag_top_k)
+            except (TypeError, ValueError):
+                k = state.rag_top_k
+            k = max(1, min(k, 20))
+            source_type = str(source_type).strip() if source_type else None
+            path_prefix = str(path_prefix).strip() if path_prefix else None
+            if source_type and len(source_type) > 64:
+                self._json(400, {"error": "source_type too long"})
+                return
+            if path_prefix and len(path_prefix) > 512:
+                self._json(400, {"error": "path_prefix too long"})
+                return
+            from local_memory import format_context
+
+            mem = self._rag_memory()
+            results = mem.search(
+                query,
+                top_k=k,
+                source_type=source_type,
+                path_prefix=path_prefix,
+            )
+            context = format_context(results, max_chars=state.rag_max_chars)
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "query": query,
+                    "context": context,
+                    "results": results,
+                    "citations": [
+                        {
+                            "citation": r["citation"],
+                            "path": r["path"],
+                            "chunk": r["chunk"],
+                            "score": r["score"],
+                            "source_type": r["source_type"],
+                        }
+                        for r in results
+                    ],
+                    "rag_enabled": True,
+                },
+            )
+
+        def _handle_rag_query_get(self, parsed) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                params = parse_qs(parsed.query)
+                query = (params.get("query") or params.get("q") or [""])[0]
+                top_k = (params.get("top_k") or [state.rag_top_k])[0]
+                source_type = (params.get("source_type") or [None])[0]
+                path_prefix = (params.get("path_prefix") or [None])[0]
+                self._do_rag_query(
+                    query,
+                    top_k,
+                    source_type=source_type,
+                    path_prefix=path_prefix,
+                )
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _handle_rag_query_post(self) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                data = self._read_json()
+                self._do_rag_query(
+                    data.get("query", ""),
+                    data.get("top_k"),
+                    source_type=data.get("source_type"),
+                    path_prefix=data.get("path_prefix"),
+                )
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _do_rag_index(self, data: dict) -> None:
+            from local_memory import DOCS_DIR as MEM_DOCS
+
+            raw_paths = data.get("paths")
+            if raw_paths is None:
+                raw_paths = [data.get("path") or str(MEM_DOCS)]
+            if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 20:
+                self._json(400, {"error": "paths must be a non-empty list (max 20)"})
+                return
+            targets = []
+            for source in raw_paths:
+                if not isinstance(source, str) or not source.strip():
+                    self._json(400, {"error": "invalid path"})
+                    return
+                if len(source) > 1024:
+                    self._json(400, {"error": "path too long"})
+                    return
+                confined = _confined_index_path(source)
+                if confined is None:
+                    self._json(
+                        403,
+                        {
+                            "error": "path_forbidden",
+                            "message": (
+                                "RAG index only under docs/, workspace/, "
+                                "or data/KAYAB_DATASETS"
+                            ),
+                        },
+                    )
+                    return
+                targets.append(confined)
+
+            if not state.rag_lock.acquire(blocking=False):
+                self._json(409, {"error": "index_busy"})
+                return
+            try:
+                mem = self._rag_memory()
+                merged = {
+                    "indexed": 0,
+                    "skipped": 0,
+                    "new_files": 0,
+                    "updated_files": 0,
+                    "errors": [],
+                }
+                for target in targets:
+                    stats = mem.index_docs(target)
+                    for key in ("indexed", "skipped", "new_files", "updated_files"):
+                        merged[key] += int(stats.get(key, 0))
+                    merged["errors"].extend(stats.get("errors", []))
+                self._json(
+                    200,
+                    {"ok": True, **merged, "status": mem.status()},
+                )
+            finally:
+                state.rag_lock.release()
+
+        def _handle_rag_index_post(self) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                data = self._read_json()
+                self._do_rag_index(data)
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _do_rag_delete_source(self, data: dict) -> None:
+            try:
+                document_id = int(data.get("id") or data.get("document_id") or 0)
+            except (TypeError, ValueError):
+                self._json(400, {"error": "invalid id"})
+                return
+            if document_id <= 0:
+                self._json(400, {"error": "id required"})
+                return
+            purge = data.get("purge") is True
+            deleted = self._rag_memory().delete_source(document_id, purge=purge)
+            if not deleted:
+                self._json(404, {"error": "source_not_found"})
+                return
+            self._json(200, {"ok": True, "deleted": document_id, "purged": purge})
+
+        def _handle_rag_delete_source_post(self) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                self._do_rag_delete_source(self._read_json())
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _do_rag_maintenance(self, data: dict) -> None:
+            if not state.rag_lock.acquire(blocking=False):
+                self._json(409, {"error": "index_busy"})
+                return
+            try:
+                from maintenance import get_metrics, maintenance_cycle
+
+                # Destructive options require a real JSON boolean. A string
+                # such as "false" must never enable a purge or disable dry-run.
+                dry_run = data.get("dry_run", True)
+                if not isinstance(dry_run, bool):
+                    dry_run = True
+                summary = maintenance_cycle(
+                    db_path=state.db_path,
+                    purge_documents=data.get("purge_documents") is True,
+                    dry_run=dry_run,
+                )
+                metrics = get_metrics(state.db_path, log=False)
+                self._json(
+                    200,
+                    {"ok": True, "maintenance": summary, "metrics": metrics},
+                )
+            finally:
+                state.rag_lock.release()
+
+        def _handle_rag_maintenance_post(self) -> None:
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                self._do_rag_maintenance(self._read_json())
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _handle_rag_post(self) -> None:
+            """Legacy single-endpoint API retained for UI/script compatibility."""
+            if not state.rag_enabled:
+                self._feature_disabled("rag", "RAG is disabled in this build.")
+                return
+            try:
+                data = self._read_json()
+                action = str(data.get("action", "query"))
+                if action in ("list", "sources"):
+                    self._rag_sources_payload(
+                        include_deleted=bool(data.get("include_deleted", False))
+                    )
+                    return
+                if action == "status":
+                    self._json(
+                        200,
+                        {"ok": True, "enabled": True, **self._rag_memory().status()},
+                    )
+                    return
+                if action == "index":
+                    self._do_rag_index(data)
+                    return
+                if action == "query":
+                    self._do_rag_query(
+                        data.get("query", ""),
+                        data.get("top_k"),
+                        source_type=data.get("source_type"),
+                        path_prefix=data.get("path_prefix"),
+                    )
+                    return
+                if action == "delete":
+                    self._do_rag_delete_source(data)
+                    return
+                if action == "maintenance":
+                    self._do_rag_maintenance(data)
+                    return
+                self._json(400, {"error": f"unknown action: {action}"})
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        # -- experience persistence --------------------------------------
+
+        def _handle_experience_status_get(self) -> None:
+            if not state.persistence_enabled:
+                self._feature_disabled(
+                    "persistence",
+                    "Experience persistence is disabled in this build.",
                 )
                 return
             try:
+                import experience_store
+
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "enabled": True,
+                        **experience_store.status(state.db_path),
+                    },
+                )
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _handle_experience_drain(self) -> None:
+            if not state.persistence_enabled:
+                self._feature_disabled(
+                    "persistence",
+                    "Experience persistence is disabled in this build.",
+                )
+                return
+            try:
+                import experience_store
                 from audit_worker import audit_worker
 
-                n = audit_worker()
-                self._json(200, {"ok": True, "processed": n})
-            except Exception as e:
-                self._json(500, {"error": str(e)})
+                data = self._read_json()
+                try:
+                    max_events = int(data.get("max_events", 100))
+                except (TypeError, ValueError):
+                    self._json(400, {"error": "max_events must be an integer"})
+                    return
+                max_events = max(1, min(max_events, 500))
+                n = audit_worker(db_path=state.db_path, max_events=max_events)
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "processed": n,
+                        "max_events": max_events,
+                        "status": experience_store.status(state.db_path),
+                    },
+                )
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
+        def _handle_experience_purge_post(self) -> None:
+            if not state.persistence_enabled:
+                self._feature_disabled(
+                    "persistence",
+                    "Experience persistence is disabled in this build.",
+                )
+                return
+            try:
+                import experience_store
+
+                data = self._read_json()
+                days = float(data.get("older_than_days", 7))
+                deleted = experience_store.purge(
+                    db_path=state.db_path,
+                    older_than_seconds=max(0, int(days * 86400)),
+                )
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "purged": deleted,
+                        "status": experience_store.status(state.db_path),
+                    },
+                )
+            except ValueError as exc:
+                code = 413 if "exceeds" in str(exc) else 400
+                self._json(code, {"error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
 
         def _handle_agent_chat(self) -> None:
             """Server-side agent loop with tools + optional RAG + output mask."""
             try:
                 from agent_loop import TOOL_PROTOCOL_HINT, interactive_react
-                from local_memory import retrieve
+                from local_memory import format_context, get_memory
                 from persona import (
                     build_persona_system,
                     load_identity,
@@ -1035,12 +1397,18 @@ def make_handler(state: GatewayState):
                     "persona", "investigador"
                 )
                 rag_ctx = ""
+                rag_results: list[dict] = []
                 if state.rag_enabled and data.get("rag", True):
-                    rag_ctx = retrieve(user_text, top_k=3)
+                    rag_results = get_memory(state.db_path).search(
+                        user_text, top_k=state.rag_top_k
+                    )
+                    rag_ctx = format_context(
+                        rag_results, max_chars=state.rag_max_chars
+                    )
 
                 system = build_persona_system(
                     persona_key,
-                    docs_context=rag_ctx,
+                    docs_context="",
                     extra_context=data.get("extra_context", ""),
                 )
 
@@ -1085,6 +1453,7 @@ def make_handler(state: GatewayState):
                     skills_index=skills_index,
                     active_skills=active_skills,
                     mcp_catalog=mcp_catalog,
+                    rag_context=rag_ctx,
                 )
 
                 messages = [{"role": "system", "content": system}]
@@ -1125,6 +1494,8 @@ def make_handler(state: GatewayState):
 
                 if state.persistence_enabled:
                     try:
+                        import uuid
+
                         from agent_loop import drain_experience_queue, enqueue_experience
 
                         any_fail = any(not t.get("ok", True) for t in tool_results)
@@ -1141,9 +1512,18 @@ def make_handler(state: GatewayState):
                                 "final": answer,
                                 "reflection": "web chat turn",
                                 "success": (not any_fail) if tool_results else True,
-                            }
+                                "model": data.get("model") or state.model_name,
+                                "tool_results": [
+                                    {"tool": t.get("tool"), "ok": t.get("ok")}
+                                    for t in tool_results
+                                ],
+                            },
+                            db_path=state.db_path,
+                            idempotency_key=uuid.uuid4().hex,
                         )
-                        drain_experience_queue(max_events=5)
+                        drain_experience_queue(
+                            db_path=state.db_path, max_events=5
+                        )
                     except Exception:
                         pass
 
@@ -1162,6 +1542,16 @@ def make_handler(state: GatewayState):
                             for t in tool_results
                         ],
                         "rag_used": bool(rag_ctx),
+                        "citations": [
+                            {
+                                "citation": r["citation"],
+                                "path": r["path"],
+                                "chunk": r["chunk"],
+                                "score": r["score"],
+                                "source_type": r["source_type"],
+                            }
+                            for r in rag_results
+                        ],
                         "redacted": redacted,
                         "messages": [
                             m

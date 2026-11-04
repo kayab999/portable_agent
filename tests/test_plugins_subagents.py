@@ -226,6 +226,27 @@ class TestSubagents(unittest.TestCase):
         self.assertIn("read_file", tools)
         self.assertNotIn("write_file", tools)
 
+    def test_run_subagent_cannot_widen_persona_tools(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_agent(root, "reviewer", "read_file")
+            agent = subagent_from_file(
+                root / "agents" / "reviewer.md", root=root / "agents"
+            )
+            with patch(
+                "agent_loop.interactive_react", return_value=("ok", [], [])
+            ) as mocked:
+                run_subagent(
+                    agent,
+                    "check",
+                    object(),
+                    persona_tools=frozenset({"execute_command"}),
+                )
+        tools = mocked.call_args.kwargs["persona_tools"]
+        self.assertNotIn("read_file", tools)
+        self.assertNotIn("execute_command", tools)
+        self.assertEqual(tools, frozenset())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -329,6 +329,8 @@ def load_config(cfg_file: Path) -> dict:
         "open_browser": True,
         "last_model": None,
         "rag_enabled": False,
+        "rag_max_chars": 6000,
+        "rag_top_k": 3,
         "experience_persistence": False,
         "agents_md_enabled": True,
         "skills_enabled": True,

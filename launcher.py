@@ -611,8 +611,19 @@ def provision_vault(force: bool = False) -> None:
 
 def main():
     print(BANNER, file=_LOG_FILE)
+    if os.environ.get("BONSAI_LOG_JSON", "").lower() in ("1", "true", "yes", "on"):
+        from bonsai_logging import configure
+
+        configure(log_file=ROOT / "runtime" / "bonsai.log")
     os_key, arch_key = detect_platform()
     cfg = load_config()
+    from config_schema import validate_config
+
+    validation = validate_config(cfg)
+    for message in validation["warnings"]:
+        warn(f"Config: {message}")
+    for message in validation["errors"]:
+        err(f"Config inválida: {message}")
 
     # Fail fast on bind addresses the stdlib server cannot serve. This runs
     # before llama-server so the user gets one clear message, not a traceback.
@@ -673,7 +684,17 @@ def main():
         action="store_true",
         help="Permitir rotar el vault sin la contraseña actual (recuperación)",
     )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Diagnóstico local (Python, modelo, binario, vault, RAG, puerto)",
+    )
     args = parser.parse_args()
+
+    if args.doctor:
+        from doctor import main as doctor_main
+
+        return doctor_main(["--port", str(args.port)])
 
     if args.set_password:
         provision_vault(force=args.force)
@@ -827,103 +848,33 @@ def main():
     sessions = SessionManager()
     vault = get_vault()
 
-    mcp_configs = list(cfg.get("mcp_servers") or [])
-    plugin_agent_roots: list[Path] = []
-    if cfg.get("plugins_enabled"):
-        try:
-            from plugin_adapters import load_plugins, merge_mcp_servers, skill_roots
-            from skills import configure_skill_roots
+    from runtime import build_runtime
 
-            plugins, plugin_errors = load_plugins(cfg.get("plugin_paths") or [])
-            for item in plugin_errors:
-                warn(f"Plugin {item.get('path')}: {item.get('error')}")
-            configure_skill_roots(skill_roots(plugins))
-            plugin_agent_roots = [
-                agent for plugin in plugins for agent in plugin.agents
-            ]
-            mcp_configs.extend(
-                merge_mcp_servers(
-                    plugins, enable=bool(cfg.get("plugins_enable_mcp", False))
-                )
-            )
-            if plugins:
-                info(
-                    "Plugins: "
-                    + ", ".join(
-                        f"{plugin.name} ({plugin.format}, "
-                        f"{len(plugin.skills)} skills, "
-                        f"{len(plugin.mcp_servers)} MCP)"
-                        for plugin in plugins
-                    )
-                )
-        except Exception as e:
-            warn(f"Plugins deshabilitados por error: {e}")
-
-    subagent_index = None
-    if cfg.get("subagents_enabled", False):
-        try:
-            from subagents import SubagentIndex
-
-            subagent_index = SubagentIndex.load(
-                ROOT, extra_roots=plugin_agent_roots
-            )
-            for item in subagent_index.errors:
-                warn(f"Subagente {item.get('path')}: {item.get('error')}")
-            if subagent_index.agents:
-                info(f"Subagentes: {', '.join(sorted(subagent_index.agents))}")
-        except Exception as e:
-            warn(f"Subagentes deshabilitados por error: {e}")
-
-    tool_registry = None
-    if cfg.get("mcp_enabled"):
-        try:
-            from mcp_client import MCPManager
-            from tool_registry import ToolRegistry
-            from tools import get_toolbox
-
-            mcp_manager = MCPManager.from_config(mcp_configs).start_all()
-            for item in mcp_manager.errors:
-                warn(f"MCP {item.get('name')}: {item.get('error')}")
-            if mcp_manager.servers:
-                ok(
-                    "MCP: "
-                    + ", ".join(
-                        f"{name} ({len(server.tools)} tools)"
-                        for name, server in mcp_manager.servers.items()
-                    )
-                )
-            tool_registry = ToolRegistry(get_toolbox(), mcp_manager)
-        except Exception as e:
-            warn(f"MCP deshabilitado por error: {e}")
-
-    try:
-        from hooks import HookManager
-        from permissions import PermissionPolicy
-
-        hooks = HookManager.from_config(cfg.get("hooks"), cwd=ROOT)
-        permissions = PermissionPolicy.from_config(cfg.get("tool_permissions"))
-        if hooks.enabled:
-            active = sum(len(items) for items in hooks.specs.values())
-            info(f"Hooks: {active} declarados")
-    except Exception as e:
-        warn(f"Hooks deshabilitados por error: {e}")
-        hooks = None
-        permissions = None
+    assembly = build_runtime(
+        cfg,
+        ROOT,
+        load_subagents=True,
+        on_warning=warn,
+        on_info=info,
+    )
+    subagent_index = assembly.subagent_index
+    tool_registry = assembly.registry
+    hooks = assembly.hooks
+    permissions = assembly.permissions
 
     if args.acp:
         from acp_server import AcpServer, _read_version, make_turn_runner
-        from gateway import _HttpModelClient
-        from tools import get_toolbox
+        from model_client import HttpModelClient
 
         model_name = model_meta.get("name", model_key)
         runner = make_turn_runner(
             root=ROOT,
             config=cfg,
-            model_client=_HttpModelClient(
+            model_client=HttpModelClient(
                 f"http://127.0.0.1:{llm_port}", model=model_name
             ),
             model=model_name,
-            toolbox=get_toolbox(),
+            toolbox=assembly.toolbox,
             registry=tool_registry,
             hooks=hooks,
             permissions=permissions,
@@ -947,6 +898,8 @@ def main():
         debug_mode=DEBUG_MODE,
         is_unlocked=is_server_unlocked,
         rag_enabled=bool(cfg.get("rag_enabled", False)),
+        rag_max_chars=int(cfg.get("rag_max_chars", 6000)),
+        rag_top_k=int(cfg.get("rag_top_k", 3)),
         persistence_enabled=bool(cfg.get("experience_persistence", False)),
         vault=vault,
         insecure_mode=(_unlock_source == "insecure"),
@@ -973,10 +926,14 @@ def main():
                 info("Auth: requerida para /api/* y /v1/* (unlock con contraseña).")
             else:
                 info("Auth: bloqueada; crea el vault con --set-password.")
-        if not gstate.rag_enabled:
-            info("RAG: deshabilitado (experimental en esta versión).")
-        if not gstate.persistence_enabled:
-            info("Memoria de experiencias: deshabilitada (experimental).")
+        if gstate.rag_enabled:
+            info("RAG: habilitado (SQLite FTS5/BM25).")
+        else:
+            info("RAG: deshabilitado (opt-in: rag_enabled).")
+        if gstate.persistence_enabled:
+            info("Memoria de experiencias: habilitada (cola durable).")
+        else:
+            info("Memoria de experiencias: deshabilitada (opt-in: experience_persistence).")
         print()
     except OSError as e:
         err(f"No se pudo iniciar gateway en {cfg['host']}:{gateway_port}: {e}")

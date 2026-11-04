@@ -574,67 +574,33 @@ def runtime_from_config(
     model: str,
     max_sessions: int = _MAX_SESSIONS,
 ) -> AcpServer:
-    """Assemble plugins, MCP, hooks, permissions and the ACP server."""
-    from gateway import _HttpModelClient
-    from hooks import HookManager
-    from permissions import PermissionPolicy
-    from tools import get_toolbox
+    """Assemble the shared runtime and wrap it in an ACP server."""
+    from model_client import HttpModelClient
+    from runtime import build_runtime
 
     root = Path(root).resolve()
-    config = config or {}
-    toolbox = get_toolbox()
-
-    mcp_configs = list(config.get("mcp_servers") or [])
-    if config.get("plugins_enabled"):
-        try:
-            from plugin_adapters import load_plugins, merge_mcp_servers, skill_roots
-            from skills import configure_skill_roots
-
-            plugins, _ = load_plugins(config.get("plugin_paths") or [])
-            configure_skill_roots(skill_roots(plugins))
-            mcp_configs.extend(
-                merge_mcp_servers(
-                    plugins, enable=bool(config.get("plugins_enable_mcp", False))
-                )
-            )
-        except Exception as exc:
-            print(f"acp: plugins disabled: {exc}", file=sys.stderr)
-
-    registry = None
-    if config.get("mcp_enabled"):
-        try:
-            from mcp_client import MCPManager
-            from tool_registry import ToolRegistry
-
-            manager = MCPManager.from_config(mcp_configs).start_all()
-            registry = ToolRegistry(toolbox, manager)
-        except Exception as exc:
-            print(f"acp: MCP disabled: {exc}", file=sys.stderr)
-
-    try:
-        hooks = HookManager.from_config(config.get("hooks"), cwd=root)
-        permissions = PermissionPolicy.from_config(config.get("tool_permissions"))
-    except Exception as exc:
-        print(f"acp: hooks/permissions disabled: {exc}", file=sys.stderr)
-        hooks = None
-        permissions = None
-
-    client = _HttpModelClient(llm_base, model=model)
+    runtime = build_runtime(
+        config,
+        root,
+        load_subagents=False,
+        on_warning=lambda message: print(f"acp: {message}", file=sys.stderr),
+    )
+    client = HttpModelClient(llm_base, model=model)
     runner = make_turn_runner(
         root=root,
-        config=config,
+        config=config or {},
         model_client=client,
         model=model,
-        toolbox=toolbox,
-        registry=registry,
-        hooks=hooks,
-        permissions=permissions,
-        max_iterations=min(int(config.get("max_iterations", 5)), 8),
+        toolbox=runtime.toolbox,
+        registry=runtime.registry,
+        hooks=runtime.hooks,
+        permissions=runtime.permissions,
+        max_iterations=min(int((config or {}).get("max_iterations", 5)), 8),
     )
     return AcpServer(
         runner,
-        hooks=hooks,
-        permissions=permissions,
+        hooks=runtime.hooks,
+        permissions=runtime.permissions,
         max_sessions=max_sessions,
         agent_version=_read_version(root),
     )

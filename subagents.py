@@ -187,14 +187,24 @@ def run_subagent(
     max_iterations: int = 3,
     hooks=None,
     permissions=None,
+    persona_tools: set[str] | frozenset[str] | None = None,
 ) -> dict:
-    """Run one subagent turn with a restricted toolset."""
+    """Run one subagent turn with a restricted toolset.
+
+    The effective toolset is the intersection of three boundaries: the
+    subagent declaration, the global allowlist/power gate, and (when provided)
+    the active persona's allowlist. A subagent can never widen the current
+    persona's permissions.
+    """
     from agent_loop import TOOL_PROTOCOL_HINT, interactive_react
     from tools import get_toolbox
 
     if not prompt or not prompt.strip():
         return {"ok": False, "error": "prompt_required"}
     toolbox = toolbox or get_toolbox()
+    effective_tools = allowed_tools_for(agent)
+    if persona_tools is not None:
+        effective_tools = frozenset(effective_tools & set(persona_tools))
     system = f"{agent.body}\n\n{TOOL_PROTOCOL_HINT}"
     messages = [{"role": "system", "content": system}]
     answer, _, results = interactive_react(
@@ -203,7 +213,7 @@ def run_subagent(
         messages,
         model=model or agent.model or "bonsai",
         toolbox=toolbox,
-        persona_tools=allowed_tools_for(agent),
+        persona_tools=effective_tools,
         hooks=hooks,
         permissions=permissions,
         max_iterations=max(1, min(int(max_iterations), 5)),

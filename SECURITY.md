@@ -52,4 +52,4 @@ Do not include real vault passwords, API tokens, or private documents.
 - Remote MCP HTTP/SSE/OAuth; only stdio MCP is supported.
 - Protection against a fully compromised local OS account.
 
-See `THREAT_MODEL.md` for assets, trust boundaries and test mapping.
+See `docs/THREAT_MODEL.md` for assets, trust boundaries and test mapping.

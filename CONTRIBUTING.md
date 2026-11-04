@@ -56,7 +56,7 @@ persistence: replace select/delete queue with leases
 security: intersect subagent tools with persona allowlist
 ```
 
-Tag releases (`v1.0.0-rc.5`) after `scripts/ci.sh` passes and `RC_DOD.md` is
+Tag releases (`v1.0.0-rc.5`) after `scripts/ci.sh` passes and `docs/RC_DOD.md` is
 updated. Never commit `config.json`, `owner.lock`, `identity.json`, `data/`,
 `models/` or workspace contents.
 

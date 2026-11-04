@@ -161,9 +161,9 @@ Unchecked items are explicitly out of scope for this release.
 ## Docs
 
 - [x] Product name: Bonsai Portable
-- [x] `README.md` + `ARCHITECTURE.md` + `MANUAL.md` aligned with rc.5
-- [x] `SECURITY.md` and `THREAT_MODEL.md`
-- [x] `CONTRIBUTING.md` with quality gates and non-negotiables
+- [x] `../README.md` + `ARCHITECTURE.md` + `MANUAL.md` aligned with rc.5
+- [x] `../SECURITY.md` and `THREAT_MODEL.md`
+- [x] `../CONTRIBUTING.md` with quality gates and non-negotiables
 - [x] `docs/RAG.md`, `docs/PERSISTENCE.md`, `docs/OPERATIONS.md`,
   `docs/ACP.md`, `docs/PLUGINS.md`, `docs/API.md`, `docs/TESTING.md`
 - [x] ADRs 001–008 recorded in `docs/ADRs/`

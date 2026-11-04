@@ -56,7 +56,7 @@
   web/CSP regression tests, a GitHub Actions matrix (Linux Python 3.11–3.13 plus
   a Windows PowerShell launcher job) and a dev-tooling guide
   (`requirements-dev.txt`, `docs/TESTING.md`).
-- **Docs.** Added `SECURITY.md`, `THREAT_MODEL.md`, `CONTRIBUTING.md`,
+- **Docs.** Added `SECURITY.md`, `docs/THREAT_MODEL.md`, `CONTRIBUTING.md`,
   `docs/RAG.md`, `docs/PERSISTENCE.md`, `docs/OPERATIONS.md`, `docs/ACP.md`,
   `docs/PLUGINS.md`, `docs/API.md` and ADRs 001–008.
 - **Tests**: 295 tests, 294 passing + 1 skipped (`pwsh` absent), up from 220. New coverage:

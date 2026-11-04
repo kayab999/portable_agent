@@ -37,7 +37,7 @@ respuesta_final = prompt_linter.fix_syntax(respuesta_llm)
 1. Añadir el hook real en `gateway._handle_agent_chat` o en el launcher.
 2. Añadir tests de regresión para las reglas que bloquean entrada.
 3. Medir latencia: el linter es regex, pero se ejecuta por turno.
-4. Actualizar `RC_DOD.md` y `README.md` solo cuando el hook exista.
+4. Actualizar `RC_DOD.md` y `../README.md` solo cuando el hook exista.
 
 ## Beneficios (si se integra)
 

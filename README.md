@@ -1,5 +1,8 @@
 # Bonsai Portable
 
+[![CI](https://github.com/kayab999/portable_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kayab999/portable_agent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Local, single-user AI runtime with a sandboxed agent loop, a same-origin web UI,
 and an OpenAI-compatible `/v1` proxy backed by `llama-server`.
 
@@ -311,7 +314,7 @@ python3 redteam/run_all.py
 python3 launcher.py --doctor
 ```
 
-See `THREAT_MODEL.md` for the threat-to-test mapping.
+See `docs/THREAT_MODEL.md` for the threat-to-test mapping.
 
 The rc.5 regression suite covers fail-closed auth, single-file vault rotation,
 PBKDF2 cost and legacy migration, origin/Host validation (including IPv6

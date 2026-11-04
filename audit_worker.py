@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Audit bus consumer: drain event_queue → CRS memory chunks."""
+"""Audit bus consumer: drain durable experience events into RAG chunks."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
-from local_memory import DB_PATH, get_memory
+import experience_store
+from local_memory import get_memory
 
 
 def _score_from_experience(data: dict) -> float:
@@ -25,71 +25,50 @@ def _score_from_experience(data: dict) -> float:
     return max(0.1, min(1.0, quality))
 
 
+def _experience_text(data: dict) -> str:
+    fields = (
+        ("Query", data.get("query", "")),
+        ("Plan", data.get("plan", "")),
+        ("Result", data.get("result", "")),
+        ("Final", data.get("final", "")),
+        ("Reflection", data.get("reflection", "")),
+        ("Success", data.get("success")),
+    )
+    lines = [f"{label}: {value}" for label, value in fields if value not in (None, "")]
+    lines.append(
+        "RAW_JSON: " + json.dumps(data, ensure_ascii=False, sort_keys=True)[:4000]
+    )
+    return "\n".join(lines)
+
+
+def _index_event(event: dict, payload: dict, db_path: Path | None) -> None:
+    memory = get_memory(db_path)
+    memory.index_docs(
+        [
+            {
+                "content": _experience_text(payload),
+                "source": f"experience/{event['id']}",
+                "source_type": "experience",
+                "quality_score": _score_from_experience(payload),
+            }
+        ]
+    )
+
+
 def audit_worker(
     *,
     db_path: Path | None = None,
     max_events: int = 100,
+    worker_id: str | None = None,
 ) -> int:
-    """
-    Process up to max_events from event_queue into CRS.
-    Returns number of events processed.
-    """
-    path = Path(db_path) if db_path is not None else DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=30)
-    mem = get_memory(path)
-    processed = 0
-
-    try:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS event_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                timestamp INTEGER NOT NULL
-            )"""
-        )
-        events = conn.execute(
-            "SELECT id, event_type, payload FROM event_queue ORDER BY id ASC LIMIT ?",
-            (max_events,),
-        ).fetchall()
-
-        for eid, event_type, payload in events:
-            try:
-                data = json.loads(payload)
-            except json.JSONDecodeError:
-                conn.execute("DELETE FROM event_queue WHERE id = ?", (eid,))
-                continue
-
-            quality = _score_from_experience(data)
-            source = f"experience:{event_type or 'PERSIST_EXPERIENCE'}"
-            # Human-readable content for retrieval (not only raw JSON)
-            content = (
-                f"Query: {data.get('query', '')}\n"
-                f"Plan: {data.get('plan', '')}\n"
-                f"Result: {data.get('result', '')}\n"
-                f"Final: {data.get('final', '')}\n"
-                f"Reflection: {data.get('reflection', '')}\n"
-                f"Success: {data.get('success')}\n"
-                f"RAW_JSON: {json.dumps(data, ensure_ascii=False)[:4000]}"
-            )
-            mem.index_docs(
-                [
-                    {
-                        "content": content,
-                        "source": source,
-                        "quality_score": quality,
-                    }
-                ]
-            )
-            conn.execute("DELETE FROM event_queue WHERE id = ?", (eid,))
-            processed += 1
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    return processed
+    """Process up to ``max_events`` claims. Returns the number completed."""
+    summary = experience_store.drain(
+        lambda event, payload: _index_event(event, payload, db_path),
+        db_path=db_path,
+        max_events=max_events,
+        worker_id=worker_id,
+    )
+    return int(summary["processed"])
 
 
 if __name__ == "__main__":

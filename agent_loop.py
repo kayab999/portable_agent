@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import time
 from pathlib import Path
 from typing import Protocol
 
-from local_memory import DB_PATH, retrieve
+from local_memory import retrieve
 from tools import (
     ALLOWED_TOOLS,
     execute_tool_calls,
@@ -148,27 +147,17 @@ def enqueue_experience(
     experience: dict,
     *,
     db_path: Path | None = None,
-) -> None:
-    path = Path(db_path) if db_path is not None else DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=30)
-    try:
-        # Ensure queue exists even if TFIDFIndex not opened yet
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS event_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                timestamp INTEGER NOT NULL
-            )"""
-        )
-        conn.execute(
-            "INSERT INTO event_queue (event_type, payload, timestamp) VALUES (?, ?, ?)",
-            ("PERSIST_EXPERIENCE", json.dumps(experience, ensure_ascii=False), int(time.time())),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    idempotency_key: str | None = None,
+) -> int:
+    """Persist one experience durably. Returns 0 for a duplicate event."""
+    import experience_store
+
+    return experience_store.enqueue(
+        "PERSIST_EXPERIENCE",
+        experience,
+        db_path=db_path,
+        key=idempotency_key,
+    )
 
 
 def drain_experience_queue(
@@ -296,8 +285,8 @@ def agent_step(
     """
     One agent step: retrieve → plan/tools → reflect → optionally persist.
 
-    Retrieval and persistence are opt-in while RAG/experience storage remain
-    experimental; the default path touches no database.
+    Retrieval and persistence are opt-in for privacy; the default path touches
+    no database.
     """
     toolbox = toolbox or get_toolbox()
     memory_context = (

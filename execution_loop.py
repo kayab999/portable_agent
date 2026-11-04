@@ -24,7 +24,7 @@ def execution_step(perception, model_client, task_state):
         system_prompt=system_prompt,
         model=model,
         toolbox=TOOLBOX,
-        # rc.5 containment: the experience pipeline is experimental and off.
+        # rc.5 containment: experience persistence stays opt-in on this path.
         persist=False,
         drain_queue=False,
     )

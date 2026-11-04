@@ -52,7 +52,7 @@ class TestMemoryIntegrity(unittest.TestCase):
         conn.close()
 
         # Injectable path: operate only on TEST_DB_PATH
-        summary1 = maintenance_cycle(db_path=TEST_DB_PATH)
+        summary1 = maintenance_cycle(db_path=TEST_DB_PATH, purge_documents=True)
         self.assertIsInstance(summary1, dict)
 
         conn = sqlite3.connect(str(TEST_DB_PATH))
@@ -69,7 +69,7 @@ class TestMemoryIntegrity(unittest.TestCase):
                 0,
                 f"Chunk should be marked inactive (score={status[1]})",
             )
-            summary2 = maintenance_cycle(db_path=TEST_DB_PATH)
+            summary2 = maintenance_cycle(db_path=TEST_DB_PATH, purge_documents=True)
             self.assertGreaterEqual(summary2.get("hard_deleted", 0), 1)
         else:
             self.assertGreaterEqual(summary1.get("hard_deleted", 0), 1)

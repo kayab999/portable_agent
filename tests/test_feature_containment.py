@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Broken RAG/persistence features are contained, not advertised."""
+"""Optional RAG/persistence features default off and fail closed when disabled."""
 from __future__ import annotations
 
 import inspect
@@ -85,7 +85,7 @@ class TestContainment(unittest.TestCase):
         self.assertFalse(params["drain_queue"].default)
         self.assertFalse(params["use_memory"].default)
 
-    def test_config_defaults_disable_experimental_features(self):
+    def test_config_defaults_disable_optional_features(self):
         cfg = runtime_core.load_config(self.tmp / "missing.json")
         self.assertFalse(cfg["rag_enabled"])
         self.assertFalse(cfg["experience_persistence"])

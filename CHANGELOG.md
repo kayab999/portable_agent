@@ -2,6 +2,68 @@
 
 ## 1.0.0-rc.5
 
+### RAG, persistence and operational completion
+- **RAG schema v2.** `documents` is now authoritative with unique
+  `(source_type, root, path)` and root-relative paths, so duplicate basenames no
+  longer collide. `chunks` references documents; `chunks_fts` is a content-backed
+  FTS5 table maintained by insert/update/delete triggers. Old `fts_chunks` /
+  `chunk_tokens` tables are dropped and rebuilt during a transactional v1→v2
+  migration. `quality_base` is immutable and maintenance only writes the derived
+  `quality_score`.
+- **Idempotent, safe ingestion.** Unchanged content is skipped; changed content
+  replaces chunks atomically; missing files are soft-deleted (`missing_file`);
+  operator-deleted sources stay deleted across re-indexing. Symlinks escaping the
+  root, oversized files and non-UTF-8 files are rejected with a report.
+- **BM25 retrieval with FTS injection safety.** Every query token is quoted before
+  `MATCH`, results are filtered to active documents, deduplicated by content hash,
+  limited per document for diversity, and bounded by `rag_max_chars` with
+  `[source: path#chunk]` citations. Empty/no-match queries return `[]`; there is
+  no arbitrary fallback.
+- **Durable experience queue.** Replaced the select-then-delete `event_queue`
+  with an `events` table using payload idempotency keys, `BEGIN IMMEDIATE` claims,
+  worker leases, stale-lease reclaim, exponential backoff and dead-lettering
+  after five attempts. Legacy `event_queue` rows migrate automatically.
+- **New HTTP APIs.** `/api/rag/status`, `/api/rag/sources`, `GET/POST
+  /api/rag/query`, `/api/rag/index`, `/api/rag/sources/delete`,
+  `/api/rag/maintenance`, `/api/experience/status`, `/api/experience/drain` and
+  `/api/experience/purge`. The legacy `/api/rag` action contract is preserved.
+  Index and maintenance jobs are mutually exclusive (`409 index_busy`). Queries
+  accept `source_type`/`path_prefix` filters and drains honor `max_events`.
+- **RAG in the prompt and UI.** Retrieved context is injected as an untrusted
+  `<<<BONSAI_RAG_CONTEXT>>>` block via `context_builder`; `/api/chat` returns
+  structured `citations`; the UI shows indexed status, indexes/queries the real
+  endpoints and renders citation cards.
+- **Safe maintenance.** `maintenance_cycle` is non-self-referential, supports
+  `dry_run`, and hard-deletes only `experience` chunks by default. Purging user
+  documents requires `purge_documents=true`. Metrics go to
+  `data/maintenance_log.jsonl`.
+- **UI/CSP hardening.** Extracted `web/styles.css` and `web/app.js`, removed all
+  inline event handlers in favor of delegated `data-action` listeners, and
+  tightened CSP to `script-src 'self'` (plus `object-src 'none'`,
+  `base-uri 'self'`, `form-action 'self'`, COOP/CORP/Permissions-Policy).
+- **Shared runtime and transport cleanup.** Added `runtime.py` (single composition
+  root for plugins/MCP/hooks/permissions/subagents), `model_client.py` (gateway and
+  ACP no longer import a private gateway class), `config_schema.py`,
+  `doctor.py --doctor`, `bonsai_logging.py` (JSON logs with secret redaction) and
+  `scripts/backup.sh` / `scripts/restore.sh`.
+- **Privilege fix.** Subagent tools are now intersected with the active persona
+  allowlist in addition to the agent declaration, global allowlist and power gate.
+- **Fail-safe API inputs.** `purge`/`purge_documents`/`dry_run` only honor real
+  JSON booleans, and RAG `path_prefix` escapes LIKE metacharacters so a filter
+  cannot silently broaden or shift its scope.
+- **Quality gates.** Branch coverage with per-module floors
+  (`scripts/check_coverage.py`), import-linter contracts, optional `pip-audit`,
+  web/CSP regression tests, a GitHub Actions matrix (Linux Python 3.11–3.13 plus
+  a Windows PowerShell launcher job) and a dev-tooling guide
+  (`requirements-dev.txt`, `docs/TESTING.md`).
+- **Docs.** Added `SECURITY.md`, `THREAT_MODEL.md`, `CONTRIBUTING.md`,
+  `docs/RAG.md`, `docs/PERSISTENCE.md`, `docs/OPERATIONS.md`, `docs/ACP.md`,
+  `docs/PLUGINS.md`, `docs/API.md` and ADRs 001–008.
+- **Tests**: 295 tests, 294 passing + 1 skipped (`pwsh` absent), up from 220. New coverage:
+  RAG schema/migration/retrieval/injection, experience lease/retry/dead-letter
+  concurrency, gateway RAG/persistence APIs, static UI/CSP, config schema,
+  doctor and log redaction.
+
 ### Interoperability and hardening
 - **AGENTS.md**: loads project instructions from the repository root down to the
   working directory, later files overriding earlier ones, capped at 32 KB. The

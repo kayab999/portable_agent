@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dev gates
+        run: python -m pip install --upgrade pip coverage ruff
+      - name: Smoke, tests, coverage, adversarial, audit, E2E, lint
+        run: bash scripts/ci.sh
+      - name: Red team suite
+        run: python redteam/run_all.py
+
+  windows:
+    name: Windows launcher (PowerShell)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: start.ps1 parse test (pwsh available on the runner)
+        run: python -m unittest tests.test_start_ps1 -v
+
+  architecture:
+    name: Import contracts and audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install audit tools
+        run: python -m pip install --upgrade pip import-linter pip-audit mypy
+      - name: Import contracts
+        run: lint-imports
+      - name: Type-check baseline (ratchet, non-blocking)
+        run: mypy .
+        continue-on-error: true
+      - name: Dependency audit
+        run: pip-audit
+        continue-on-error: true

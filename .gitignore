@@ -43,6 +43,7 @@ Thumbs.db
 tests/audit_data/
 tests/test_data/tmp/
 .coverage
+coverage.json
 htmlcov/
 coverage.xml
 .ruff_cache/

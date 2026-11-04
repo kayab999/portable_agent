@@ -3,7 +3,7 @@
 Product: **Bonsai Portable** (internal: CRS)
 Version: `1.0.0-rc.5` (see `VERSION`)
 
-Every checked item must map to an automated test that fails on rc.3 behavior.
+Every checked item maps to an automated test that fails on rc.3 behavior.
 Unchecked items are explicitly out of scope for this release.
 
 ## Functional
@@ -15,16 +15,31 @@ Unchecked items are explicitly out of scope for this release.
 - [x] Server-side agent loop (`/api/chat`) with canonical tool protocol + timeline
 - [x] Strict `<tool_call>` parsing; fenced/standalone JSON is not executed
   (`tests/test_tool_parser_strict.py`)
-- [ ] RAG index/retrieval — **experimental, disabled by default**
-  (`tests/test_feature_containment.py`)
-- [ ] Experience persistence — **experimental, disabled by default**
-  (`tests/test_feature_containment.py`)
+- [x] RAG index/retrieval with SQLite FTS5/BM25, schema v2, citations
+  (`tests/test_rag_store.py`, `tests/test_gateway_rag.py`)
+- [x] RAG v1→v2 migration preserves content and searchability
+  (`tests/test_rag_store.py::TestRagMigration`)
+- [x] RAG ingestion is idempotent, confined, and soft-deletes missing sources
+  (`tests/test_rag_store.py`, `tests/test_gateway_auth.py`)
+- [x] Experience persistence with idempotency, leases, retry and dead-letter
+  (`tests/test_experience_store.py`, `tests/test_gateway_rag.py`)
+- [x] RAG and persistence remain opt-in and report `503 feature_unavailable`
+  when disabled (`tests/test_feature_containment.py`)
+- [x] Maintenance scoring is non-self-referential, dry-runnable, and purges
+  documents only with explicit opt-in (`audit_suite/data_quality/test_memory_integrity.py`)
 
 ## Quality
 
 - [x] Unit + adversarial + audit + production E2E green (`./scripts/ci.sh`)
-- [x] 220 tests: 219 passing + 1 skipped (`pwsh` absent)
+- [x] 295 tests: 294 passing + 1 skipped (`pwsh` absent)
 - [x] Lint gate (`ruff` curated rules) at 0 findings
+- [x] Branch coverage with per-module floors (`scripts/check_coverage.py`)
+- [x] Import contracts: storage never imports transports; ACP never imports the
+  HTTP gateway (`pyproject.toml`, optional `lint-imports`)
+- [x] Shared composition root and model transport are covered, including
+  fail-closed plugin/MCP wiring (`tests/test_runtime.py`)
+- [x] CI matrix: Linux Python 3.11–3.13, Windows PowerShell launcher job and an
+  import-contract/audit job (`.github/workflows/ci.yml`)
 - [x] E2E: debug boot → health → `/v1` → clean shutdown
 - [x] E2E: production boot without vault stays locked; `/v1` is 401
   (`tests/test_e2e_boot.py`)
@@ -34,6 +49,8 @@ Unchecked items are explicitly out of scope for this release.
 - [x] Adversarial sandbox-escape tests green
 - [x] 64 concurrent searches + concurrent read/write, SQLite integrity `ok`
   (`tests/test_sqlite_concurrency.py`)
+- [x] Concurrent queue drains never duplicate events
+  (`tests/test_experience_store.py`)
 
 ## Setup & Portability
 
@@ -43,6 +60,12 @@ Unchecked items are explicitly out of scope for this release.
 - [x] `start.ps1` parses under PowerShell when `pwsh` is available
   (`tests/test_start_ps1.py`)
 - [x] Any `.gguf` via `models/` or `--model /path`
+- [x] `--doctor` / `doctor.py --json` diagnostics
+  (`tests/test_doctor.py`)
+- [x] Config schema validation fails fast with actionable messages
+  (`tests/test_config_schema.py`)
+- [x] Backup/restore scripts refuse unsafe archive paths
+- [x] Shared composition root for launcher and ACP (`runtime.py`)
 
 ## Compatibility (rc.5)
 
@@ -52,8 +75,8 @@ Unchecked items are explicitly out of scope for this release.
   (`tests/test_skills.py`)
 - [x] `load_skill` progressive disclosure; scripts are never executed
   (`tests/test_skills.py`)
-- [x] Fixed system-prompt order with untrusted-content delimiters
-  (`tests/test_context_builder.py`)
+- [x] Fixed system-prompt order with untrusted-content delimiters, including
+  RAG context (`tests/test_context_builder.py`)
 - [x] MCP stdio handshake, namespaced tools, allowlists and fail-closed dispatch
   (`tests/test_mcp_client.py`)
 - [x] MCP results are labeled untrusted and size-capped
@@ -65,7 +88,7 @@ Unchecked items are explicitly out of scope for this release.
 - [x] Declarative plugin adapters for Claude/Gemini/Hermes/Antigravity never
   execute plugin code (`tests/test_plugins_subagents.py`)
 - [x] Markdown subagents restrict tools to the global allowlist intersection
-  (`tests/test_plugins_subagents.py`)
+  **and** the active persona allowlist (`tests/test_plugins_subagents.py`)
 - [x] ACP v1 stdio server: initialize, session/new, prompt, cancel and updates;
   no fs/terminal/client MCP bridging (`tests/test_acp.py`)
 - [x] A2A is an explicit non-goal for local-only deployments (documented)
@@ -87,7 +110,7 @@ Unchecked items are explicitly out of scope for this release.
 - [x] A verified unlock can mint new tokens; wrong passwords are rejected before
   unlock (`tests/test_auth_fail_closed.py`)
 - [x] `--cli` prompts for the vault password when production is locked
-- [x] Experimental persistence is off in every entrypoint, including
+- [x] RAG/persistence default off in every entrypoint, including
   `execution_loop` (`tests/test_feature_containment.py`)
 - [x] No `Access-Control-Allow-Origin: *`; exact loopback origin only
   (`tests/test_origin_host.py`)
@@ -108,9 +131,21 @@ Unchecked items are explicitly out of scope for this release.
 - [x] `POST /api/tools` disabled outside DEBUG
 - [x] Non-loopback bind requires `BONSAI_ALLOW_LAN=1`
 - [x] Body size limit (2 MiB) + rate limits
-- [x] Security response headers (CSP, nosniff, frame-deny)
+- [x] Security response headers: CSP `script-src 'self'`, `object-src 'none'`,
+  `base-uri 'self'`, `form-action 'self'`, COOP/CORP, nosniff, frame-deny
+  (`tests/test_web_static.py`)
+- [x] UI has no inline event handlers or inline `<script>`/`<style>`
+  (`tests/test_web_static.py`)
+- [x] FTS queries cannot inject operators; inactive/deleted chunks never return
+  (`tests/test_rag_store.py`)
+- [x] Experience retries are idempotent and dead-lettered, never silently lost
+  (`tests/test_experience_store.py`)
+- [x] Structured logs redact bearer tokens, API keys and `sk-*` secrets
+  (`tests/test_logging.py`)
+- [x] Threat model maps each asset/threat to tests (`THREAT_MODEL.md`)
 - [ ] OS-level isolation (seccomp/nsjail) — out of scope
 - [ ] Multi-user identity provider — out of scope
+- [ ] At-rest encryption of RAG/persistence data — out of scope (use FDE)
 
 ## UX
 
@@ -119,13 +154,21 @@ Unchecked items are explicitly out of scope for this release.
 - [x] Markdown subset rendering
 - [x] Cancel (Esc) + toasts on errors
 - [x] Sidebar/sources persisted in localStorage
-- [x] RAG status visible (disabled notice instead of false success)
+- [x] RAG status/sources visible; index and query wired to the real endpoints
+- [x] Chat renders RAG citations with path, chunk and score
+- [x] RAG errors surface as toasts instead of false success
 
 ## Docs
 
 - [x] Product name: Bonsai Portable
 - [x] `README.md` + `ARCHITECTURE.md` + `MANUAL.md` aligned with rc.5
-- [x] `Known limitations` documents RAG, persistence, reflection, dead modules
+- [x] `SECURITY.md` and `THREAT_MODEL.md`
+- [x] `CONTRIBUTING.md` with quality gates and non-negotiables
+- [x] `docs/RAG.md`, `docs/PERSISTENCE.md`, `docs/OPERATIONS.md`,
+  `docs/ACP.md`, `docs/PLUGINS.md`, `docs/API.md`, `docs/TESTING.md`
+- [x] ADRs 001–008 recorded in `docs/ADRs/`
+- [x] `Known limitations` documents opt-in RAG/persistence, at-rest encryption,
+  Windows verification and dead modules
 - [x] `MASK_GUIDE.md` says hash, not cryptographic signature
 - [x] `INTEGRATION_GUIDE.md` says the linter is not mounted
 - [x] Honest redteam/README (no false seccomp claims)

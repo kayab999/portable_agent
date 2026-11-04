@@ -1,0 +1,11 @@
+# Development-only tools. The runtime itself is stdlib-only:
+# none of these packages are imported by production code.
+coverage>=7.4
+ruff>=0.4
+mypy>=1.10
+import-linter>=2.0
+pip-audit>=2.7
+bandit>=1.7
+hypothesis>=6.100
+playwright>=1.44
+mutmut>=2.4

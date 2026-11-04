@@ -11,8 +11,15 @@ fi
 echo "== smoke =="
 "$PYTHON" scripts/smoke_boot.py
 
-echo "== unit tests (incl. rc.5: auth, vault, origin/host, /v1, sqlite, parser, containment, hooks, plugins, ACP) =="
-"$PYTHON" -m unittest discover -s tests -v
+echo "== unit tests with branch coverage =="
+if "$PYTHON" -c "import coverage" 2>/dev/null; then
+  "$PYTHON" -m coverage run --branch -m unittest discover -s tests -v
+  "$PYTHON" scripts/check_coverage.py
+else
+  echo "  coverage no disponible en $PYTHON — ejecutando suite sin cobertura"
+  echo "  (instalar en el venv: pip install coverage)"
+  "$PYTHON" -m unittest discover -s tests -v
+fi
 
 echo "== adversarial sandbox escape =="
 "$PYTHON" -m unittest tests.test_sandbox_escape tests.test_gateway_auth tests.test_persona_tools -v
@@ -32,6 +39,20 @@ if command -v ruff &>/dev/null; then
   ruff check .
 else
   echo "  ruff no disponible — saltando (instalar: pip install ruff)"
+fi
+
+echo "== import contracts =="
+if command -v lint-imports &>/dev/null; then
+  lint-imports
+else
+  echo "  import-linter no disponible — saltando (pip install import-linter)"
+fi
+
+echo "== dependency audit =="
+if command -v pip-audit &>/dev/null; then
+  pip-audit --skip-editable || true
+else
+  echo "  pip-audit no disponible — saltando (pip install pip-audit)"
 fi
 
 echo "CI PASS"

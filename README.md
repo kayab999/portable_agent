@@ -9,8 +9,9 @@ Version: `1.0.0-rc.5` (see `VERSION`).
 > Windows launcher. rc.5 adds fail-closed compatibility surfaces: AGENTS.md
 > context, read-only Agent Skills, an opt-in stdio MCP client, lifecycle hooks,
 > a per-tool permission policy, declarative plugin adapters, markdown subagents,
-> and an ACP v1 stdio server. RAG and experience persistence remain
-> **disabled by default**. See [Known limitations](#known-limitations).
+> and an ACP v1 stdio server. RAG (FTS5/BM25, schema v2) and experience
+> persistence (claim/lease queue) are now complete but remain **opt-in** for
+> privacy. See [Known limitations](#known-limitations).
 
 ## Requirements
 
@@ -96,10 +97,11 @@ Tokens live in RAM only and expire after 24 hours (or on restart).
 | Subagents (`agents/*.md`) | Working, restricted tool intersection |
 | ACP v1 (stdio) | Opt-in (`launcher.py --acp`) |
 | A2A | **Out of scope** for local-only deployments |
-| RAG index/retrieval | **Experimental, disabled by default** |
-| Experience persistence | **Experimental, disabled by default** |
-| Maintenance/GC scoring | **Experimental, not scheduled** |
-| Knowledge DB / prompt linter | Not wired (dead code, kept for now) |
+| RAG index/retrieval (FTS5/BM25, schema v2) | Working, opt-in (`rag_enabled`) |
+| Experience persistence (lease/retry/dead-letter) | Working, opt-in (`experience_persistence`) |
+| Maintenance/GC scoring | Working, dry-run and document-safe purge |
+| RAG API + citations + UI indicator | Working |
+| Knowledge DB / prompt linter | Legacy, unreachable from production |
 
 ## Compatibility
 
@@ -263,37 +265,32 @@ access to the vault can delete or replace it.
 
 ## Known limitations
 
-- **RAG is disabled.** The shipped rc.3 database had chunks missing and the
-  maintenance cycle could permanently orphan `doc_stats`. rc.5 contains the
-  feature behind `rag_enabled: false`. `/api/rag` returns `503 feature_unavailable`.
-- **Experience persistence is disabled.** The rc.3 drain could deadlock after the
-  first event and duplicate writes on retry. rc.5 does not enqueue or drain by
-  default.
-- **Reflection, scoring, accent folding, and schema migrations** are not part of
-  rc.5. They are tracked for the next release.
-- `knowledge_db.py` and `linter.py` are present but unreachable from the
-  production entrypoint.
+- **RAG and persistence are opt-in.** They are fully implemented but disabled
+  by default (`rag_enabled: false`, `experience_persistence: false`) because
+  indexing local files and retaining turns are privacy decisions.
+- **RAG is lexical.** FTS5/BM25 is the baseline; optional local embeddings are
+  not part of 1.0.
+- **`knowledge_db.py` and `linter.py` are legacy.** They remain in the tree for
+  reference but are unreachable from the production entrypoint.
 - `agentportable.py` is a legacy compatibility shim that delegates to
-  `launcher.main()`; its old auth globals are unused.
+  `launcher.main()`.
 - **IPv6 is not supported.** `ThreadingHTTPServer` is IPv4-only, so a configured
   `::1` is rejected at startup with a clear message instead of failing at bind.
 - **Skill scripts are not executed.** `scripts/` is readable but inert; there is
   no OS sandbox to run third-party code safely.
-- **MCP is stdio-only.** Remote HTTP/SSE and OAuth are not implemented. Schema
-  pinning across restarts is not yet persisted.
-- **Plugin support is declarative.** Claude Code, Gemini CLI, Hermes, and
-  Antigravity manifests are adapted read-only; plugin code is never executed.
-  Plugin MCP servers remain disabled until `plugins_enable_mcp` is enabled.
-- **A2A is out of scope.** There is no remote agent-to-agent transport; ACP is
-  the only editor integration and is stdio-only.
-- **LAN mode is not supported in rc.5.** `BONSAI_ALLOW_LAN=1` permits a
-  non-loopback bind, but Host validation only accepts loopback hostnames, so LAN
-  clients are rejected. Loopback remains the only tested configuration.
+- **MCP is stdio-only.** Remote HTTP/SSE and OAuth are explicit non-goals.
+- **Plugin support is declarative.** Plugin code is never executed; plugin MCP
+  servers remain disabled until `plugins_enable_mcp` is enabled.
+- **A2A is out of scope.** ACP is the only editor integration and is stdio-only.
+- **LAN mode is not supported.** `BONSAI_ALLOW_LAN=1` permits a non-loopback
+  bind, but Host validation only accepts loopback hostnames, so LAN clients are
+  rejected. Loopback is the only tested configuration.
 - **YubiKey unlock is experimental** and only works when the vault password is
-  the hardware challenge-response; there is no separate hardware verifier yet.
-- `data/KAYAB_DATASETS` is an optional external dataset path; remove the symlink
-  if it is not mounted.
-- The UI's engine/model panel and sources library are not fully wired.
+  the hardware challenge-response.
+- **Windows/macOS are best-effort.** Linux is the first-class CI target; the
+  `start.ps1` path needs a real Windows runner to be claimed as verified.
+- **No at-rest encryption for RAG/persistence data.** Use full-disk encryption
+  if the device may be stolen.
 - No LAN mode, no multi-user auth, no OS-level sandbox.
 
 ## Configuration
@@ -311,7 +308,10 @@ BONSAI_CONFIG=/path/to/config.json ./start.sh
 ./scripts/ci.sh
 python3 -m unittest discover -s tests -v
 python3 redteam/run_all.py
+python3 launcher.py --doctor
 ```
+
+See `THREAT_MODEL.md` for the threat-to-test mapping.
 
 The rc.5 regression suite covers fail-closed auth, single-file vault rotation,
 PBKDF2 cost and legacy migration, origin/Host validation (including IPv6
@@ -319,7 +319,9 @@ rejection), `/v1` auth, concurrent SQLite access, strict tool parsing, feature
 containment, AGENTS.md loading, Agent Skills parsing/discovery, MCP stdio
 dispatch, hooks and permission enforcement, plugin adapters, subagent tool
 restriction, ACP session/cancel flows, and production-mode E2E. Current count:
-**220 tests, 219 passing + 1 skipped** (`pwsh` absent).
+**295 tests** (1 skipped when `pwsh` is absent), plus coverage floors,
+import contracts, web/CSP checks, RAG migration/relevance tests, experience
+lease/retry tests and production probes.
 
 ## License
 

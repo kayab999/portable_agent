@@ -1,0 +1,15 @@
+# === FLAVOR: TECHNICAL (Strict) ===
+
+[[rules]]
+id = "R100_STYLE_NO_SUBJECTIVE"
+severity = "CRITICAL"
+description = "Prohibir adjetivos subjetivos en especificaciones técnicas"
+check_type = "regex"
+pattern = "\\b(better|faster|cleaner|efficient|optimized|mejor|rápido|limpio)\\b"
+
+[[rules]]
+id = "R100_STYLE_NO_PLACEHOLDERS"
+severity = "HIGH"
+description = "Detectar variables {{variable}} sin llenar"
+check_type = "regex"
+pattern = "\\{\\{[^}]+\\\}" 

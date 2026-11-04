@@ -1,0 +1,33 @@
+# Bonsai Portable — configuración de herramientas
+
+[tool.ruff]
+# Solo código del proyecto; nunca dependencias ni artefactos
+extend-exclude = [
+    ".venv",
+    "archive",
+    "web",
+    "docs",
+    "workspace",
+    "data",
+    "models",
+    "audit_data",
+]
+
+[tool.ruff.lint]
+# Curado: imports sin usar, shadowing (F811), nombres no definidos (F821),
+# variables muertas (F841), nulls mal escritos, bare except, statements
+# múltiples por línea y f-strings sin placeholders.
+select = [
+    "F401",
+    "F541",
+    "F811",
+    "F821",
+    "F841",
+    "E711",
+    "E712",
+    "E722",
+    "E701",
+    "E702",
+    "E703",
+    "B",
+]

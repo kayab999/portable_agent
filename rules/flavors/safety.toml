@@ -1,0 +1,16 @@
+# === FLAVOR: SAFETY (Essential) ===
+
+[[rules]]
+id = "S001_NO_SENSITIVE_FILES"
+severity = "CRITICAL"
+description = "Detectar intentos de acceder a archivos del sistema"
+check_type = "regex"
+pattern = "/etc/passwd|/windows/system32|/root/|\.ssh/"
+
+[[rules]]
+id = "S002_NO_API_KEYS"
+severity = "HIGH"
+description = "Detectar posibles fugas de API Keys o Secrets"
+check_type = "regex"
+pattern = "[a-zA-Z0-9]{32,45}|sk-[a-zA-Z0-9]{48}"
+

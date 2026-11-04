@@ -1,0 +1,15 @@
+# === REGLAS BASE PARA AGENTE PORTABLE ===
+
+[[rules]]
+id = "R001_NO_THINK_TAG"
+severity = "CRITICAL"
+description = "Eliminar tags de razonamiento interno <think> de la salida final"
+check_type = "regex"
+pattern = "<think>|</think>|<reasoning>|</reasoning>"
+
+[[rules]]
+id = "R006_MODEL_DECLARED_SUCCESS"
+severity = "HIGH"
+description = "Evitar que el modelo declare éxito innecesariamente"
+check_type = "regex"
+pattern = "(?i)(i have succeeded|here is the refined|he refinado con éxito)"

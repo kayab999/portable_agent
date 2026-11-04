@@ -1,0 +1,326 @@
+# Bonsai Portable
+
+Local, single-user AI runtime with a sandboxed agent loop, a same-origin web UI,
+and an OpenAI-compatible `/v1` proxy backed by `llama-server`.
+
+Version: `1.0.0-rc.5` (see `VERSION`).
+
+> **Release scope:** rc.4 hardened auth, CORS/Host, SQLite, parsing, and the
+> Windows launcher. rc.5 adds fail-closed compatibility surfaces: AGENTS.md
+> context, read-only Agent Skills, an opt-in stdio MCP client, lifecycle hooks,
+> a per-tool permission policy, declarative plugin adapters, markdown subagents,
+> and an ACP v1 stdio server. RAG and experience persistence remain
+> **disabled by default**. See [Known limitations](#known-limitations).
+
+## Requirements
+
+- Python 3.11+
+- A `llama-server` binary for your platform (`python launcher.py --setup`)
+- At least one `.gguf` model under `models/`
+
+## Quick start
+
+```bash
+# Download the llama-server binary and choose models (optional interactive)
+python3 launcher.py --setup
+
+# Create the owner password vault (first production run)
+python3 launcher.py --set-password
+
+# Start gateway + UI + model
+./start.sh
+# or: python3 launcher.py --no-browser
+```
+
+The gateway serves the UI at `http://127.0.0.1:8080` and proxies inference at
+`http://127.0.0.1:8080/v1`. The internal `llama-server` listens on
+`port + llm_port_offset` (default `8180`) and is not exposed.
+
+### Development mode
+
+```bash
+BONSAI_DEBUG=1 ./start.sh          # no auth, direct tools, power tools
+BONSAI_INSECURE=1 ./start.sh       # issues tokens without a password (dev only)
+BONSAI_POWER_TOOLS=1 ./start.sh    # enable python_exec / shell / fetch_url
+```
+
+`BONSAI_DEBUG=1` and `BONSAI_INSECURE=1` print a loud warning and must not be
+used for a distributed build.
+
+## Authentication
+
+Production boots **locked**:
+
+- Without `owner.lock`, `POST /api/session/unlock` returns
+  `403 not_provisioned`. There is no default password and no fail-open path.
+- `python launcher.py --set-password` writes a single `owner.lock` file
+  (mode `0600`) containing the KDF parameters, salt, and Encrypt-then-MAC
+  canary. Rotation is one atomic `os.replace`.
+- PBKDF2-HMAC-SHA256 runs at 600,000 iterations. Existing rc.3 vaults
+  (separate salt/canary files at 100k iterations) still unlock and are
+  re-encrypted at the current cost on first successful verification.
+- Unlock is rate-limited (5 attempts/minute) and returns a bearer token.
+- Once a session is unlocked, a new tab or the CLI can mint a token without
+  repeating the password until the process restarts.
+- `./start.sh --cli` prompts for the vault password when the server is locked.
+- `/api/*` and `/v1/*` require that token. `/health` and `/api/health` are public.
+- CORS and Host headers are restricted to the gateway's own loopback origin.
+- `--yubikey` verifies the challenge-response against the owner vault; a missing
+  or failed key leaves the server locked. This only succeeds if the vault was
+  provisioned with a password equal to the YubiKey response, so treat hardware
+  unlock as experimental.
+
+Tokens live in RAM only and expire after 24 hours (or on restart).
+
+## Feature status
+
+| Capability | Status |
+|---|---|
+| One-command start (Linux/macOS) | Working |
+| One-command start (Windows) | `start.ps1`, Python-first; parse-tested in CI when `pwsh` is available |
+| Gateway UI + `/api/*` + `/v1` proxy | Working |
+| Password vault / session auth | Working |
+| Origin/Host hardening | Working |
+| Sandboxed read/write/list/stats tools | Working |
+| `python_exec` AST sandbox | Working, intentionally restrictive |
+| `execute_command` / `fetch_url` | Working, power-gated |
+| Persona tool allowlists | Working |
+| Canonical `<tool_call>` protocol | Working, strict by default |
+| AGENTS.md project context | Working, read-only, capped at 32 KB |
+| Agent Skills (`SKILL.md`) | Working, read-only; scripts never executed |
+| MCP tools (stdio) | Opt-in (`mcp_enabled`), namespaced, allowlisted |
+| MCP remote HTTP / OAuth | Not implemented |
+| Lifecycle hooks | Opt-in (`hooks.enabled`), no shell, fail-closed pre-events |
+| Per-tool permissions (`allow`/`ask`/`deny`) | Working; `ask` fails closed headless |
+| Plugin manifests (Claude/Gemini/Hermes/Antigravity) | Read-only declarative import; code never executed |
+| Subagents (`agents/*.md`) | Working, restricted tool intersection |
+| ACP v1 (stdio) | Opt-in (`launcher.py --acp`) |
+| A2A | **Out of scope** for local-only deployments |
+| RAG index/retrieval | **Experimental, disabled by default** |
+| Experience persistence | **Experimental, disabled by default** |
+| Maintenance/GC scoring | **Experimental, not scheduled** |
+| Knowledge DB / prompt linter | Not wired (dead code, kept for now) |
+
+## Compatibility
+
+Bonsai reads the ecosystem's declarative surfaces. It never executes foreign
+plugin code.
+
+| Surface | Behavior |
+|---|---|
+| `AGENTS.md` | Loaded root→cwd, later files override; 32 KB cap |
+| Agent Skills | `skills/`, `.agents/skills/`, `.claude/skills/`, `.opencode/skills/`, `.gemini/skills/`, `~/.agents/skills/` |
+| Skill activation | Compact index in the prompt; `load_skill(name)` or `/skill-name` loads the body |
+| MCP (stdio) | Config-declared servers; tools exposed as `mcp__server__tool` |
+| Plugin packages | Read-only manifest adapters for Claude Code, Gemini CLI, Hermes, and Antigravity; only skills/agents/MCP/hook declarations are imported |
+| Subagents | Markdown files in `agents/`, `.agents/agents/`, `.claude/agents/`; declared tools are intersected with the global allowlist |
+| Hooks | Six lifecycle events; JSON on stdin, exit `2` or `{"decision":"block"}` blocks |
+| ACP | `python3 launcher.py --acp`; JSON-RPC v1 over stdio, no fs/terminal bridge |
+
+Skill directories are read-only roots for `read_file`, so `references/` and
+`assets/` work. `scripts/` are never executed by Bonsai.
+
+Example MCP configuration:
+
+```json
+{
+  "mcp_enabled": true,
+  "mcp_servers": [
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/data"],
+      "enabled": true,
+      "tools_allow": ["read_file", "list_directory"]
+    }
+  ]
+}
+```
+
+MCP tool descriptions and results are treated as untrusted content. Every call
+is gated by the configured server allowlist and by the active persona.
+
+## Hooks and permissions
+
+Both surfaces are owner-controlled and off by default. External content cannot
+create or alter them.
+
+```json
+{
+  "hooks": {
+    "enabled": true,
+    "pre_tool": [
+      {
+        "command": "python3",
+        "args": ["hooks/check_tool.py"],
+        "matcher": "write_file",
+        "timeout_ms": 3000
+      }
+    ]
+  },
+  "tool_permissions": {
+    "default": "allow",
+    "rules": {"write_file": "ask", "mcp__*": "deny"},
+    "auto_approve": []
+  }
+}
+```
+
+- Events: `session_start`, `user_prompt`, `pre_llm`, `pre_tool`, `post_tool`,
+  `session_end`.
+- Hooks receive a JSON payload on stdin, run without a shell, with a sanitized
+  environment and a bounded timeout/output.
+- Exit `0` allows, exit `2` blocks, other exits warn without blocking. A
+  `{"decision": "block", "reason": "..."}` object on stdout also blocks.
+- `user_prompt`, `pre_llm`, and `pre_tool` fail closed on timeout or start
+  errors. Post-events do not block.
+- `ask` requires interactive approval; headless gateway and ACP turns treat it
+  as `deny` unless the tool is listed in `auto_approve`.
+
+## Plugins and subagents
+
+`plugins_enabled: true` reads manifests without executing plugin code:
+
+| Package | Manifest |
+|---|---|
+| Claude Code | `.claude-plugin/plugin.json` |
+| Gemini CLI | `gemini-extension.json` |
+| Hermes | `plugin.yaml` |
+| Antigravity | `plugin.json` |
+
+Skills, prompt-only agents, MCP server definitions, and hook declarations are
+imported. `package.json`, `index.js`, `index.ts`, `main.py`, and similar runtime
+entrypoints are reported as unsupported and never run. Plugin MCP servers stay
+disabled unless `plugins_enable_mcp: true` is also set.
+
+Subagents are Markdown files with frontmatter:
+
+```markdown
+---
+name: reviewer
+description: Reviews a change for regressions
+tools: [read_file, list_dir, grep]
+---
+
+You are a careful reviewer. Report findings without modifying files.
+```
+
+Declared tools are an upper bound: they are intersected with the global
+allowlist and the power-tool gate. Without a `tools` list, subagents get the
+normal non-power toolset. Exposed at `GET /api/subagents` and
+`POST /api/subagent` when `subagents_enabled` is true. Subagents are **off by
+default**; enable them in `config.json` after reviewing the agent files.
+
+## ACP (Agent Client Protocol)
+
+```bash
+python3 launcher.py --acp
+# or attach to an existing llama-server:
+BONSAI_LLM_BASE=http://127.0.0.1:8180 python3 acp_server.py
+```
+
+ACP v1 runs JSON-RPC 2.0 over stdin/stdout and supports `initialize`,
+`authenticate`, `session/new`, `session/prompt`, `session/cancel`, and
+`session/update` notifications. It advertises no filesystem, terminal, image,
+audio, or embedded-context capabilities. `session/new` rejects client-provided
+MCP servers, and tool calls still pass through hooks, permissions, and the
+workspace sandbox. A2A is an explicit non-goal: the product is local-only and
+has no remote agent transport.
+
+## Security model
+
+- Default bind is loopback. `BONSAI_ALLOW_LAN=1` permits a non-loopback bind but
+  LAN is **not supported** yet: Host validation only accepts loopback names and
+  will reject LAN clients.
+- The gateway is a `ThreadingHTTPServer`; SQLite access uses one connection per
+  operation (WAL + busy timeout), so concurrent requests are safe.
+- Read roots: `workspace/`, `docs/`, and `data/KAYAB_DATASETS` when it exists.
+  Write root: `workspace/`.
+- Subprocess tools use a command whitelist without interpreters and a workspace
+  cwd. `python_exec` uses an AST allowlist and `python -I`.
+- SSRF protection blocks loopback, private, link-local, and metadata addresses,
+  including after redirects.
+- Tool JSON is only executed from explicit `<tool_call>...</tool_call>` blocks.
+  Fenced code and standalone JSON lines are ignored unless
+  `BONSAI_LEGACY_TOOL_PARSING=1` is set.
+- AGENTS.md, skill bodies, MCP tool descriptions, and MCP results are delimited
+  and labeled untrusted. They cannot grant permissions or override policy.
+- External content influence is separated from execution: a skill declaring
+  `allowed-tools` never expands the persona/global allowlist.
+- MCP servers run as child processes with a sanitized environment, no shell, a
+  cwd jail, timeouts, and output caps. Local MCP servers still have the host
+  user's filesystem access; enable only servers you trust.
+- Hooks are local commands declared only in the owner's configuration. They run
+  without a shell and receive only an allowlisted environment; secrets in the
+  parent process are not forwarded.
+- `ask` permissions cannot be answered by the headless gateway or ACP, so they
+  fail closed unless explicitly auto-approved.
+- Plugin adapters parse declarative metadata only. JavaScript, TypeScript, and
+  Python plugin entrypoints are never imported or executed.
+
+This is **not** an OS sandbox and not multi-tenant. A process with filesystem
+access to the vault can delete or replace it.
+
+## Known limitations
+
+- **RAG is disabled.** The shipped rc.3 database had chunks missing and the
+  maintenance cycle could permanently orphan `doc_stats`. rc.5 contains the
+  feature behind `rag_enabled: false`. `/api/rag` returns `503 feature_unavailable`.
+- **Experience persistence is disabled.** The rc.3 drain could deadlock after the
+  first event and duplicate writes on retry. rc.5 does not enqueue or drain by
+  default.
+- **Reflection, scoring, accent folding, and schema migrations** are not part of
+  rc.5. They are tracked for the next release.
+- `knowledge_db.py` and `linter.py` are present but unreachable from the
+  production entrypoint.
+- `agentportable.py` is a legacy compatibility shim that delegates to
+  `launcher.main()`; its old auth globals are unused.
+- **IPv6 is not supported.** `ThreadingHTTPServer` is IPv4-only, so a configured
+  `::1` is rejected at startup with a clear message instead of failing at bind.
+- **Skill scripts are not executed.** `scripts/` is readable but inert; there is
+  no OS sandbox to run third-party code safely.
+- **MCP is stdio-only.** Remote HTTP/SSE and OAuth are not implemented. Schema
+  pinning across restarts is not yet persisted.
+- **Plugin support is declarative.** Claude Code, Gemini CLI, Hermes, and
+  Antigravity manifests are adapted read-only; plugin code is never executed.
+  Plugin MCP servers remain disabled until `plugins_enable_mcp` is enabled.
+- **A2A is out of scope.** There is no remote agent-to-agent transport; ACP is
+  the only editor integration and is stdio-only.
+- **LAN mode is not supported in rc.5.** `BONSAI_ALLOW_LAN=1` permits a
+  non-loopback bind, but Host validation only accepts loopback hostnames, so LAN
+  clients are rejected. Loopback remains the only tested configuration.
+- **YubiKey unlock is experimental** and only works when the vault password is
+  the hardware challenge-response; there is no separate hardware verifier yet.
+- `data/KAYAB_DATASETS` is an optional external dataset path; remove the symlink
+  if it is not mounted.
+- The UI's engine/model panel and sources library are not fully wired.
+- No LAN mode, no multi-user auth, no OS-level sandbox.
+
+## Configuration
+
+`config.json` is local state and ignored by git. Start from the example:
+
+```bash
+cp config.example.json config.json
+BONSAI_CONFIG=/path/to/config.json ./start.sh
+```
+
+## Tests
+
+```bash
+./scripts/ci.sh
+python3 -m unittest discover -s tests -v
+python3 redteam/run_all.py
+```
+
+The rc.5 regression suite covers fail-closed auth, single-file vault rotation,
+PBKDF2 cost and legacy migration, origin/Host validation (including IPv6
+rejection), `/v1` auth, concurrent SQLite access, strict tool parsing, feature
+containment, AGENTS.md loading, Agent Skills parsing/discovery, MCP stdio
+dispatch, hooks and permission enforcement, plugin adapters, subagent tool
+restriction, ACP session/cancel flows, and production-mode E2E. Current count:
+**220 tests, 219 passing + 1 skipped** (`pwsh` absent).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

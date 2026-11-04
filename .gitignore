@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Local state and secrets
+config.json
+owner.lock
+identity.json
+data/vault_salt.bin
+data/vault_canary.txt
+data/vector_db/*.db
+data/vector_db/*.db-wal
+data/vector_db/*.db-shm
+data/knowledge.db
+data/knowledge.db-wal
+data/knowledge.db-shm
+data/snapshots/
+data/personas/
+data/KAYAB_DATASETS
+*.bak
+
+# User workspace and runtime output
+workspace/*
+!workspace/.gitkeep
+maintenance_log*.jsonl
+runtime/*.log
+
+# Models are large; download them with --setup
+models/*.gguf
+models/**/*.gguf
+models/audio/*
+tools/*.gguf
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Test/runtime artifacts
+tests/audit_data/
+tests/test_data/tmp/
+.coverage
+htmlcov/
+coverage.xml
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

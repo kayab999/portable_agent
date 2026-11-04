@@ -1,0 +1,22 @@
+{
+  "port": 8080,
+  "host": "127.0.0.1",
+  "ngl": 0,
+  "threads": 0,
+  "open_browser": true,
+  "last_model": null,
+  "rag_enabled": false,
+  "experience_persistence": false,
+  "agents_md_enabled": true,
+  "skills_enabled": true,
+  "mcp_enabled": false,
+  "mcp_servers": [],
+  "hooks": {},
+  "tool_permissions": {},
+  "plugins_enabled": false,
+  "plugin_paths": [],
+  "plugins_enable_mcp": false,
+  "subagents_enabled": false,
+  "yubikey_auto": false,
+  "llm_port_offset": 100
+}

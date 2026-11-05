@@ -25,7 +25,7 @@ echo "== adversarial sandbox escape =="
 "$PYTHON" -m unittest tests.test_sandbox_escape tests.test_gateway_auth tests.test_persona_tools -v
 
 echo "== audit suite =="
-"$PYTHON" -m unittest \
+BONSAI_LEGACY_PATHS=1 "$PYTHON" -m unittest \
   audit_suite.red_team.test_tools_security \
   audit_suite.chaos_monkey.test_execution_resilience \
   audit_suite.data_quality.test_memory_integrity \

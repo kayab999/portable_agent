@@ -197,6 +197,8 @@ def _normalize_mcp(plugin_name: str, raw) -> list[dict]:
                 ]
             else:
                 entry["tools_allow"] = []
+        if cfg.get("allow_all_tools") is True:
+            entry["allow_all_tools"] = True
         servers.append(entry)
     return servers
 

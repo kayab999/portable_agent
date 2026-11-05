@@ -31,6 +31,7 @@ def _config(**overrides):
         "enabled": True,
         "env": {},
         "timeout": 10,
+        "allow_all_tools": True,
     }
     config.update(overrides)
     return config
@@ -188,11 +189,20 @@ class TestMCPManager(unittest.TestCase):
         result = manager.call("mcp__fake__echo", {"text": "x"})
         self.assertEqual(result["error"], "mcp_tool_not_found")
 
-    def test_invalid_tools_allow_rejected(self):
+    def test_omitted_allowlist_denies_all_tools_by_default(self):
+        manager = MCPManager.from_config(
+            [_config(allow_all_tools=False)]
+        ).start_all()
+        self.addCleanup(manager.close)
+        self.assertEqual(manager.names(), frozenset())
+        server = manager.servers["fake"]
+        self.assertIsNone(server.proc)
+        result = manager.call("mcp__fake__echo", {"text": "x"})
+        self.assertEqual(result["error"], "mcp_tool_not_found")
         for value in (None, "echo", [""], [42]):
             with self.subTest(value=value):
                 manager = MCPManager.from_config(
-                    [_config(tools_allow=value)]
+                    [_config(tools_allow=value, allow_all_tools=False)]
                 )
                 self.assertEqual(manager.servers, {})
                 self.assertTrue(manager.errors)

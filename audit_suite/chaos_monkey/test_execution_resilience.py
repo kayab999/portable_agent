@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("BONSAI_LEGACY_PATHS", "1")
+
 import sys
 sys.path.append(".")
 import unittest

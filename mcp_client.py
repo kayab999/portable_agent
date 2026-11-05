@@ -126,14 +126,18 @@ def _validate_result(server: str, method: str, result: dict) -> dict:
     )
 
 
-def _normalize_tool_allowlist(tools_allow: object) -> tuple[str, ...] | None:
-    """Return ``None`` when unset, or a strict allowlist (possibly empty).
+def _normalize_tool_allowlist(
+    tools_allow: object, allow_all_tools: bool = False
+) -> tuple[str, ...] | None:
+    """Return ``None`` for explicit all-tools, ``()`` for deny-all, or a list.
 
-    An explicit empty list means "no tools". It must never be confused with an
-    omitted allowlist, which leaves the server's advertised catalog available.
+    Omitting both ``tools_allow`` and ``allow_all_tools`` now denies all tools.
+    This avoids implicit privileges from an omitted field.
     """
-    if tools_allow is None:
+    if allow_all_tools and tools_allow is None:
         return None
+    if tools_allow is None:
+        return ()
     if not isinstance(tools_allow, (list, tuple)):
         raise MCPError("tools_allow must be a list of tool names")
     normalized: list[str] = []
@@ -158,6 +162,7 @@ class MCPServer:
         env: dict[str, str] | None = None,
         cwd: str | Path | None = None,
         tools_allow: list[str] | None = None,
+        allow_all_tools: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
     ):
         if not name or not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", name):
@@ -169,7 +174,7 @@ class MCPServer:
         self.args = [str(arg) for arg in (args or [])]
         self.extra_env = {str(k): str(v) for k, v in (env or {}).items()}
         self.cwd = str(cwd) if cwd else None
-        self.tools_allow = _normalize_tool_allowlist(tools_allow)
+        self.tools_allow = _normalize_tool_allowlist(tools_allow, allow_all_tools)
         self.timeout = float(timeout)
         self.proc: subprocess.Popen | None = None
         self._queue: queue.Queue = queue.Queue()
@@ -590,6 +595,11 @@ class MCPManager:
                         "tools_allow must be a list of tool names "
                         "(use [] to deny all tools)"
                     )
+                allow_all_tools = bool(raw.get("allow_all_tools", False))
+                if "allow_all_tools" in raw and not isinstance(
+                    raw.get("allow_all_tools"), bool
+                ):
+                    raise MCPError("allow_all_tools must be a boolean")
                 servers.append(
                     MCPServer(
                         name=str(raw.get("name", "")),
@@ -597,9 +607,8 @@ class MCPManager:
                         args=raw.get("args") or [],
                         env=raw.get("env") or {},
                         cwd=raw.get("cwd"),
-                        # Missing key => None (all advertised tools). Explicit
-                        # [] => strict empty allowlist (no tools at all).
                         tools_allow=tools_allow,
+                        allow_all_tools=allow_all_tools,
                         timeout=float(raw.get("timeout", DEFAULT_TIMEOUT)),
                     )
                 )

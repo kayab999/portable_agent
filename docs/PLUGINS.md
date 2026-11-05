@@ -45,7 +45,7 @@ Plugin MCP declarations are merged only when `mcp_enabled` and
 `plugins_enable_mcp` are both true. Only stdio commands are supported. The
 runtime never accepts remote HTTP/SSE/OAuth MCP endpoints. If a plugin declares
 `tools_allow`, only those tools are exposed; an explicit empty list exposes
-none, while omitting the key exposes the server's advertised catalog.
+none, while omitting the key exposes no tools unless `allow_all_tools: true` is set.
 
 ## What plugins cannot do
 

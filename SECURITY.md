@@ -60,7 +60,8 @@ Do not include real vault passwords, API tokens, or private documents.
 - **Downloads are integrity-checked.** `--setup` pins model SHA-256 hashes in
   `MODEL_CATALOG` and requires the GitHub release digest (or explicit
   `BONSAI_BIN_SHA256`) for `llama-server`. Mismatches delete the partial
-  file and fail closed; hashing is streaming.
+  file and fail closed; hashing is streaming. ZIP members are validated
+  before extraction.
 - **External content is delimited.** AGENTS.md, skills, MCP metadata, RAG
   results and user sources are wrapped in `<<<BONSAI_*>>>` blocks and can never
   grant permissions or authorize tool use.

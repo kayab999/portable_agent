@@ -235,6 +235,38 @@ class TestSSRF(unittest.TestCase):
         self.assertEqual(result["content"], "done")
         self.assertEqual(calls, ["http://public.example/a/b", "http://public.example/next"])
 
+    def test_redirect_to_rebinding_hostname_blocked(self):
+        calls = []
+
+        def fake_fetch(url, timeout):
+            calls.append(url)
+            scheme, host, port, target = tools._parse_fetch_url(url)
+            tools._resolve_validated_addresses(host, port)
+            if url == "http://public.example/start":
+                return {
+                    "status": 302,
+                    "reason": "Found",
+                    "headers": {"location": "http://rebind.example/private"},
+                    "body": b"",
+                }
+            raise AssertionError(url)
+
+        answers = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        private = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+        ]
+
+        with (
+            patch("tools._fetch_once", side_effect=fake_fetch),
+            patch("tools.socket.getaddrinfo", side_effect=[answers, private]),
+        ):
+            result = self.toolbox.fetch_url("http://public.example/start")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "url_bloqueada")
+        self.assertEqual(len(calls), 2)
+
     def test_redirect_loop_rejected(self):
         calls = []
 

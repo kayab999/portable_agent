@@ -373,7 +373,19 @@ class TestExtractArchive(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runtime_core._extract_archive(arc, "llama-cli", out)
 
-    def test_zip_variant(self):
+    def test_zip_rejects_path_traversal(self):
+        import zipfile
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            arc = td / "bad.zip"
+            with zipfile.ZipFile(arc, "w") as zf:
+                zf.writestr("../escape.txt", "bad")
+            out = td / "out"
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", out)
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             import zipfile

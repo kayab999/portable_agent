@@ -154,9 +154,10 @@ enforces `resultType`. If a stdio server does not implement the modern
 revision, the client falls back to the legacy `initialize` handshake. A
 recognized modern error never triggers that fallback.
 
-`tools_allow` is optional. Omit it to expose every tool advertised by the
-server; an explicit empty list exposes none. Calls for tools that were not
-advertised or not allowlisted are rejected even if invoked directly.
+`tools_allow` is optional. Omit it to expose no tools; use
+`allow_all_tools: true` for explicit full-catalog access. An explicit empty
+list also exposes no tools. Calls for tools that were not advertised or not
+allowlisted are rejected even if invoked directly.
 
 MCP tool descriptions and results are treated as untrusted content. Every call
 is gated by the configured server allowlist, the permission policy and the

@@ -80,8 +80,8 @@ MCP: solo stdio; tools como `mcp__server__tool`; servidores declarados en
 `config.json` con `enabled: true` y `tools_allow` opcional. El cliente habla
 MCP `2026-07-28` (`server/discover` y `_meta` por petición) y cae al handshake
 legacy `initialize` solo con servidores que no implementan la revisión moderna.
-Un `tools_allow: []` explícito no expone ninguna tool; omitirlo expone el
-catálogo anunciado. Entorno saneado, sin shell, timeout y tope de salida.
+Un `tools_allow: []` explícito no expone ninguna tool; omitirlo también deniega
+todo salvo `allow_all_tools: true`. Entorno saneado, sin shell, timeout y tope de salida.
 
 ## RAG y persistencia
 

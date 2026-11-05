@@ -131,5 +131,11 @@ def validate_config(config: dict) -> dict:
                     f"mcp_servers[{index}].tools_allow must be a list of "
                     "non-empty strings"
                 )
+        if "allow_all_tools" in server and not isinstance(
+            server.get("allow_all_tools"), bool
+        ):
+            errors.append(
+                f"mcp_servers[{index}].allow_all_tools must be a boolean"
+            )
 
     return {"errors": errors, "warnings": warnings}

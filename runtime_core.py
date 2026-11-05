@@ -154,6 +154,26 @@ def verify_file_sha256(path: Path, expected: str) -> str:
     return actual
 
 
+def _validate_zip_members(archive: zipfile.ZipFile) -> None:
+    """Reject unsafe ZIP member paths and symlinks."""
+    from pathlib import PurePosixPath
+
+    for info in archive.infolist():
+        name = info.filename
+        if not name or name.endswith("/"):
+            # Directory entries are still path-checked below.
+            pass
+        posix = PurePosixPath(name)
+        if posix.is_absolute() or ".." in posix.parts:
+            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
+        if any(part in ("", ".",) for part in posix.parts):
+            # Allow normal names; reject empty/traversal-ish components.
+            pass
+        mode = (info.external_attr >> 16) & 0o170000
+        if mode == 0o120777 or mode == 0o120000:
+            raise RuntimeError(f"Symlinks are not allowed in ZIP archives: {name!r}")
+
+
 def _extract_archive(archive: Path, exe_name: str, dest_dir: Path) -> None:
     """Extrae el release completo y deja el binario directamente en dest_dir.
 
@@ -167,6 +187,7 @@ def _extract_archive(archive: Path, exe_name: str, dest_dir: Path) -> None:
     stage.mkdir(exist_ok=True)
     if archive.suffix == ".zip":
         with zipfile.ZipFile(archive) as zf:
+            _validate_zip_members(zf)
             zf.extractall(stage)
     else:
         with tarfile.open(archive, "r:gz") as tf:

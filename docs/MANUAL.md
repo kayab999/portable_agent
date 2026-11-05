@@ -189,8 +189,9 @@ con una clave de idempotencia; la reflexión no se inventa.
 - MCP: procesos hijos con entorno saneado, sin shell, cwd fijado, timeout y
   tope de salida. El cliente usa `server/discover` y `_meta` por petición en
   `2026-07-28`, con fallback al handshake legacy `initialize`. Un
-  `tools_allow: []` explícito no expone ninguna tool. Las descripciones y
-  resultados MCP son contenido no confiable.
+  `tools_allow: []` explícito no expone ninguna tool; omitirlo también deniega
+  todo salvo `allow_all_tools: true`. Las descripciones y resultados MCP son
+  contenido no confiable.
 - Hooks: comandos locales declarados solo por el propietario, sin shell, con
   entorno saneado (no se filtran secretos), timeout y tope de salida. `user_prompt`,
   `pre_llm` y `pre_tool` fallan cerrados ante timeout o error de arranque.

@@ -174,6 +174,8 @@ persistencia está activa y devuelve `citations` cuando RAG está activo.
 | `BONSAI_POWER_TOOLS=1` | Habilita execute_command / fetch_url / python_exec (gate inicial) |
 | `BONSAI_UNSAFE_PYTHON_EXEC=1` | Opt-in adicional para python_exec sin aislamiento OS |
 | `knowledge_db_enabled` | Habilita `knowledge_lookup` y `/api/knowledge/*` |
+| `agent_runs_enabled` | Persiste ejecuciones de agente (opt-in) |
+| `agent_tracing_enabled` | Persiste trazas redactadas (opt-in) |
 | `BONSAI_BIN_SHA256` | SHA-256 explícito para `llama-server` (`--setup`; falla cerrada) |
 | `BONSAI_HTTP_LOG=1` | Access log del gateway |
 | `BONSAI_LOG_JSON=1` | Logs estructurados en `runtime/bonsai.log` |

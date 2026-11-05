@@ -22,5 +22,7 @@
   "yubikey_auto": false,
   "knowledge_db_enabled": false,
   "knowledge_context_enabled": false,
+  "agent_runs_enabled": false,
+  "agent_tracing_enabled": false,
   "llm_port_offset": 100
 }

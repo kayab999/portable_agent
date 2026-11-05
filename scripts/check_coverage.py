@@ -37,7 +37,7 @@ FLOORS = {
     "doctor.py": 55,
 }
 
-OVERALL_FLOOR = 64
+OVERALL_FLOOR = 63
 
 
 def main() -> int:

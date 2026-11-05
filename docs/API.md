@@ -67,7 +67,16 @@ bearer token and is rate limited. Feature-disabled responses use
 | `POST` | `/api/experience/drain` | `{max_events?}` |
 | `POST` | `/api/experience/purge` | `{older_than_days?}` |
 
-## Errors
+## Agent runs
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/runs` | list recent runs (auth required) |
+| `GET` | `/api/runs/{run_id}` | run metadata and steps |
+| `GET` | `/api/runs/{run_id}/trace` | redacted trace events |
+
+Runs are disabled by default (`agent_runs_enabled`). Tracing is separately
+controlled by `agent_tracing_enabled`.
 
 | Status | Meaning |
 |---|---|

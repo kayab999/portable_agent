@@ -12,11 +12,14 @@ Fenced/standalone JSON and ReAct "TOOL:" lines are legacy opt-in only
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
 from typing import Protocol
 
+from agent_runs import create_run, finish_run, record_step, finish_step
+from agent_trace import emit_event
 from local_memory import retrieve
 from tools import (
     ALLOWED_TOOLS,
@@ -281,6 +284,10 @@ def agent_step(
     db_path: Path | None = None,
     drain_queue: bool = False,
     use_memory: bool = False,
+    run_id: str | None = None,
+    persist_run: bool = False,
+    trace: bool = False,
+    config: dict | None = None,
 ) -> dict:
     """
     One agent step: retrieve → plan/tools → reflect → optionally persist.
@@ -289,9 +296,40 @@ def agent_step(
     no database.
     """
     toolbox = toolbox or get_toolbox()
+    config = config or {}
+    runs_enabled = bool(
+        persist_run
+        or config.get("agent_runs_enabled")
+        or os.environ.get("BONSAI_AGENT_RUNS_ENABLED", "").lower()
+        in ("1", "true", "yes", "on")
+    )
+    trace_enabled = bool(
+        trace
+        or config.get("agent_tracing_enabled")
+        or os.environ.get("BONSAI_AGENT_TRACING_ENABLED", "").lower()
+        in ("1", "true", "yes", "on")
+    )
+
+    if runs_enabled and run_id is None:
+        run_id = create_run(
+            goal=str(task_state.get("goal") or perception)[:2000],
+            persona=str(task_state.get("persona") or ""),
+            model=model,
+            config=config,
+        )
+    if run_id is not None:
+        task_state["run_id"] = run_id
+
     memory_context = (
         retrieve(perception, top_k=3, db_path=db_path) if use_memory else ""
     )
+
+    step_index = 0
+    step_id = None
+    if runs_enabled and run_id is not None:
+        step_id = record_step(run_id, step_index, status="running", messages=[])
+        if trace_enabled:
+            emit_event(run_id, "step_started", name="agent_step", payload={"step": step_index})
 
     messages = [
         {"role": "system", "content": f"{system_prompt}\n\n{TOOL_PROTOCOL_HINT}"},
@@ -317,6 +355,10 @@ def agent_step(
             if decision.blocked:
                 task_state["status"] = "blocked"
                 task_state["message"] = f"Blocked by hook: {decision.reason}"
+                if runs_enabled and run_id is not None:
+                    finish_run(run_id, status="failed", error=task_state["message"])
+                    if trace_enabled:
+                        emit_event(run_id, "run_failed", status="blocked", payload={"reason": decision.reason})
                 return task_state
         try:
             response = model_client.chat_completion(model, messages)
@@ -325,6 +367,10 @@ def agent_step(
             if attempt == max_retries - 1:
                 task_state["status"] = "error"
                 task_state["message"] = f"LLM unavailable after {max_retries} attempts: {e}"
+                if runs_enabled and run_id is not None:
+                    finish_run(run_id, status="failed", error=task_state["message"])
+                    if trace_enabled:
+                        emit_event(run_id, "run_failed", status="error", payload={"error": str(e)})
                 return task_state
             time.sleep(1)
 
@@ -363,10 +409,25 @@ def agent_step(
 
         if not results:
             action_result = "No tool executed"
+            if runs_enabled and step_id is not None:
+                finish_step(step_id, status="completed", model_output=plan)
+                step_id = None
             break
 
         all_results.extend(results)
         action_result = formatted
+        if runs_enabled and step_id is not None:
+            finish_step(step_id, status="running", tool_results=results, model_output=plan)
+            step_id = None
+        if trace_enabled and run_id is not None:
+            for r in results:
+                emit_event(
+                    run_id,
+                    "tool_call",
+                    name=str(r.get("tool", "")),
+                    status="ok" if r.get("ok") else "error",
+                    payload={"result_preview": str(r.get("message", ""))[:500]},
+                )
         messages.append({"role": "assistant", "content": plan})
         messages.append(
             {
@@ -374,6 +435,11 @@ def agent_step(
                 "content": f"Resultados de herramientas:\n{formatted}\nContinúa o responde al usuario.",
             }
         )
+        if runs_enabled and run_id is not None and step_id is None:
+            step_index += 1
+            step_id = record_step(run_id, step_index, status="running", messages=messages)
+            if trace_enabled:
+                emit_event(run_id, "step_started", name="agent_step", payload={"step": step_index})
         try:
             response = model_client.chat_completion(model, messages)
             plan = response.get("content", "")
@@ -384,6 +450,10 @@ def agent_step(
         # If model returned final answer without new tools, stop
         if not extract_tool_calls(plan):
             break
+
+    if runs_enabled and step_id is not None:
+        finish_step(step_id, status="completed", model_output=plan)
+        step_id = None
 
     final = extract_final_answer(plan) or plan
 
@@ -424,6 +494,11 @@ def agent_step(
             except Exception:
                 pass
 
+    if runs_enabled and run_id is not None:
+        finish_run(run_id, status="completed", final_answer=final)
+        if trace_enabled:
+            emit_event(run_id, "run_completed", payload={"steps": len(all_results)})
+
     if ref_parsed["success"]:
         task_state["done"] = True
     task_state["steps"] = int(task_state.get("steps", 0)) + 1
@@ -431,6 +506,8 @@ def agent_step(
     task_state["final"] = final
     task_state["success"] = ref_parsed["success"]
     task_state["experience"] = experience
+    if run_id is not None:
+        task_state["run_id"] = run_id
     return task_state
 
 
@@ -446,15 +523,41 @@ def interactive_react(
     hooks=None,
     permissions=None,
     max_iterations: int = 5,
+    run_id: str | None = None,
+    persist_run: bool = False,
+    trace: bool = False,
+    config: dict | None = None,
 ) -> tuple[str, list[dict], list[dict]]:
     """
     Multi-turn ReAct for chat UIs/CLI.
     Returns (final_text, updated_messages, tool_results_flat).
     """
     toolbox = toolbox or get_toolbox()
+    config = config or {}
+    runs_enabled = bool(
+        persist_run
+        or config.get("agent_runs_enabled")
+        or os.environ.get("BONSAI_AGENT_RUNS_ENABLED", "").lower()
+        in ("1", "true", "yes", "on")
+    )
+    trace_enabled = bool(
+        trace
+        or config.get("agent_tracing_enabled")
+        or os.environ.get("BONSAI_AGENT_TRACING_ENABLED", "").lower()
+        in ("1", "true", "yes", "on")
+    )
+    if runs_enabled and run_id is None:
+        run_id = create_run(
+            goal=str(messages[-1].get("content", "") if messages else user_input)[:2000],
+            model=model,
+            config=config,
+        )
+
     messages = list(messages)
     messages.append({"role": "user", "content": user_input})
     tool_results_flat: list[dict] = []
+    step_index = 0
+    step_id = None
 
     for _ in range(max_iterations):
         if hooks is not None:
@@ -466,7 +569,13 @@ def interactive_react(
             if decision.blocked:
                 message = f"⛔ Bloqueado por hook: {decision.reason}"
                 messages.append({"role": "assistant", "content": message})
+                if runs_enabled and run_id is not None:
+                    finish_run(run_id, status="failed", error=message)
                 return message, messages, tool_results_flat
+        if runs_enabled and run_id is not None and step_id is None:
+            step_id = record_step(run_id, step_index, status="running", messages=messages)
+            if trace_enabled:
+                emit_event(run_id, "step_started", name="interactive_react", payload={"step": step_index})
         response = model_client.chat_completion(model, messages)
         reply = response.get("content", "")
 
@@ -482,6 +591,18 @@ def interactive_react(
 
         if results:
             tool_results_flat.extend(results)
+            if runs_enabled and step_id is not None:
+                finish_step(step_id, status="running", tool_results=results, model_output=reply)
+                step_id = None
+            if trace_enabled and run_id is not None:
+                for r in results:
+                    emit_event(
+                        run_id,
+                        "tool_call",
+                        name=str(r.get("tool", "")),
+                        status="ok" if r.get("ok") else "error",
+                        payload={"result_preview": str(r.get("message", ""))[:500]},
+                    )
             messages.append({"role": "assistant", "content": reply})
             messages.append(
                 {
@@ -489,10 +610,17 @@ def interactive_react(
                     "content": f"Resultados de herramientas:\n{formatted}\nContinúa o da la respuesta final.",
                 }
             )
+            step_index += 1
             continue
 
         answer = final if final is not None else reply
         messages.append({"role": "assistant", "content": answer})
+        if runs_enabled and run_id is not None:
+            if step_id is not None:
+                finish_step(step_id, status="completed", model_output=answer)
+            finish_run(run_id, status="completed", final_answer=answer)
+            if trace_enabled:
+                emit_event(run_id, "run_completed", payload={"steps": len(tool_results_flat)})
         return answer, messages, tool_results_flat
 
     messages.append(
@@ -501,4 +629,8 @@ def interactive_react(
             "content": "⚠️ Bonsai: límite de iteraciones alcanzado.",
         }
     )
+    if runs_enabled and run_id is not None:
+        if step_id is not None:
+            finish_step(step_id, status="failed", error="iteration limit")
+        finish_run(run_id, status="failed", error="iteration limit")
     return messages[-1]["content"], messages, tool_results_flat

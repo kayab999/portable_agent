@@ -35,6 +35,8 @@ KNOWN_KEYS = frozenset(
         "max_iterations",
         "knowledge_db_enabled",
         "knowledge_context_enabled",
+        "agent_runs_enabled",
+        "agent_tracing_enabled",
     }
 )
 
@@ -51,6 +53,8 @@ _BOOL_KEYS = (
     "yubikey_auto",
     "knowledge_db_enabled",
     "knowledge_context_enabled",
+    "agent_runs_enabled",
+    "agent_tracing_enabled",
 )
 
 

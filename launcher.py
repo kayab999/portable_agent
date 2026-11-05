@@ -964,6 +964,7 @@ def main():
         subagents_enabled=bool(cfg.get("subagents_enabled", False)),
         subagent_index=subagent_index,
         knowledge_db_enabled=bool(cfg.get("knowledge_db_enabled", False)),
+        config=cfg,
     )
     # Hardware unlock authorizes this process, not arbitrary local clients.
     # Hand a short-lived token only to the CLI/browser started by the launcher.

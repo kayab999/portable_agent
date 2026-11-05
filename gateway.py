@@ -128,6 +128,7 @@ class GatewayState:
         subagents_enabled: bool = False,
         subagent_index=None,
         knowledge_db_enabled: bool = False,
+        config: dict | None = None,
     ):
         self.llm_base = llm_base.rstrip("/")
         self.debug_mode = debug_mode
@@ -161,6 +162,7 @@ class GatewayState:
         self.subagents_enabled = subagents_enabled
         self.subagent_index = subagent_index
         self.knowledge_db_enabled = bool(knowledge_db_enabled)
+        self.config = config or {}
         self.rag_lock = threading.Lock()
         self.rate_limit = _RateBucket(max_requests=90, window_s=60.0)
         self.chat_rate_limit = _RateBucket(max_requests=30, window_s=60.0)
@@ -489,6 +491,40 @@ def make_handler(state: GatewayState):
                     self._json(200, {"enabled": True, "stats": stats})
                 except Exception as e:
                     self._json(500, {"error": "knowledge_error", "message": str(e)})
+                return
+
+            if path == "/api/runs":
+                if not self._require_auth():
+                    return
+                from agent_runs import list_runs
+
+                try:
+                    limit = int(self.headers.get("X-Limit", 20) or 20)
+                except ValueError:
+                    limit = 20
+                self._json(200, {"runs": list_runs(limit)})
+                return
+
+            if path.startswith("/api/runs/"):
+                if not self._require_auth():
+                    return
+                run_id = path[len("/api/runs/"):]
+                if "/" in run_id:
+                    run_id, suffix = run_id.split("/", 1)
+                else:
+                    suffix = ""
+                from agent_runs import get_run
+
+                run = get_run(run_id)
+                if run is None:
+                    self._json(404, {"error": "not_found"})
+                    return
+                if suffix == "trace":
+                    from agent_trace import read_events
+
+                    self._json(200, {"run_id": run_id, "events": read_events(run_id)})
+                else:
+                    self._json(200, run)
                 return
 
             if path == "/api/config":
@@ -1557,6 +1593,9 @@ def make_handler(state: GatewayState):
                     hooks=state.hooks,
                     permissions=state.permissions,
                     max_iterations=max_iter,
+                    persist_run=bool(state.config.get("agent_runs_enabled", False)),
+                    trace=bool(state.config.get("agent_tracing_enabled", False)),
+                    config=state.config,
                 )
 
                 redacted = []

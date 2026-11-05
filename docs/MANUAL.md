@@ -68,6 +68,7 @@ subagentes) vive en `runtime.py` y la comparten el launcher y ACP.
 | Herramientas read/write/list/stats | Funciona |
 | `python_exec` (opt-in, sin aislamiento OS) | Funciona; requiere gate unsafe aparte |
 | `knowledge_lookup` (BD de conocimiento opt-in) | Funciona; `knowledge_db_enabled` |
+| Ejecuciones durables / trazas (opt-in) | `agent_runs_enabled`, `agent_tracing_enabled` |
 | `execute_command` / `fetch_url` | Funciona, power-gated |
 | Allowlists de persona | Funciona |
 | Protocolo `<tool_call>` | Funciona, estricto por defecto |

@@ -14,6 +14,10 @@ data/vault_canary.txt
 data/vector_db/*.db
 data/vector_db/*.db-wal
 data/vector_db/*.db-shm
+data/agent_runs.db
+data/agent_runs.db-wal
+data/agent_runs.db-shm
+data/traces/
 data/knowledge.db
 data/knowledge.db-wal
 data/knowledge.db-shm

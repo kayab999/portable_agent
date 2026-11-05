@@ -179,6 +179,7 @@ MODEL_CATALOG = {
         "profile": "thesis",
         "ctx": 65536,
         "hf_url": "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf",
+        "sha256": "284a335aa3fb2ced3b1b01fcb40b08aa783e3b70832767f0dd2e3fdfa134bd54",
     },
     "bonsai-4b": {
         "file": "Bonsai-4B.gguf",
@@ -186,6 +187,7 @@ MODEL_CATALOG = {
         "profile": "general",
         "ctx": 32768,
         "hf_url": "https://huggingface.co/prism-ml/Bonsai-4B-gguf/resolve/main/Bonsai-4B.gguf",
+        "sha256": "4524b3f997f0f06444e568d1f26e2efd69effa3218c7ad3047432fb171e42168",
     },
     "bonsai-1.7b": {
         "file": "Bonsai-1.7B.gguf",
@@ -193,6 +195,7 @@ MODEL_CATALOG = {
         "profile": "quick",
         "ctx": 16384,
         "hf_url": "https://huggingface.co/prism-ml/Bonsai-1.7B-gguf/resolve/main/Bonsai-1.7B.gguf",
+        "sha256": "3d7c6c90dd98717a203adb22d5eacd2581850e40aa5327e144b97766cae5f7e3",
     },
 }
 
@@ -272,13 +275,13 @@ def save_config(cfg: dict):
 
 
 def wait_for_server(host: str, port: int, timeout: int = 30) -> bool:
-    import urllib.request
+    from model_client import _DIRECT_OPENER
 
     url = f"http://{host}:{port}/health"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1):
+            with _DIRECT_OPENER.open(url, timeout=1):
                 return True
         except Exception:
             time.sleep(0.5)
@@ -310,27 +313,54 @@ def build_server_cmd(
 # ─── CLI INTERACTIVA (modo sin web) ──────────────────────────────────────────
 
 
-def run_cli_mode(host: str, port: int, meta: dict, rag: bool = False):
+def run_cli_mode(
+    host: str,
+    port: int,
+    meta: dict,
+    rag: bool = False,
+    initial_token: str | None = None,
+):
     """Cliente CLI minimalista: usa /api/chat del gateway (auth + persona + sandbox)."""
     import urllib.request
     import urllib.error
 
     base_url = f"http://{host}:{port}"
     history: list[dict] = []
-    session_token: str | None = None
+    session_token: str | None = initial_token
 
     def _unlock() -> str | None:
         nonlocal session_token
 
-        def _post(payload: dict) -> dict:
+        def _post(payload: dict, token: str | None = None) -> dict:
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+                headers["X-Bonsai-Token"] = token
             req = urllib.request.Request(
                 f"{base_url}/api/session/unlock",
                 data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read())
+
+        # Exchange a launcher-provided bootstrap token for a normal session.
+        if session_token:
+            try:
+                data = _post({}, token=session_token)
+                token = data.get("token")
+                if token:
+                    session_token = token
+                    return session_token
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    warn("Rate limit en unlock — espera unos segundos.")
+                    return None
+                # Expired/invalid bootstrap token: fall through to password.
+            except Exception as e:
+                warn(f"Session unlock: {e}")
+            session_token = None
 
         try:
             data = _post({})
@@ -499,11 +529,25 @@ def run_setup(os_key: str, arch_key: str):
 
     for _key, meta in to_download:
         dest = MODELS / meta["file"]
+        expected = str(meta.get("sha256") or "").strip()
+        if not expected:
+            raise RuntimeError(
+                f"Modelo {meta['file']} no tiene SHA-256 fijado en MODEL_CATALOG"
+            )
         if dest.exists():
-            ok(f"{meta['name']} — ya descargado.")
+            runtime_core.verify_file_sha256(dest, expected)
+            ok(f"{meta['name']} — ya descargado (SHA-256 verificado).")
             continue
         info(f"Descargando {meta['name']}...")
         _download_with_rate_limit(meta["hf_url"], dest)
+        try:
+            runtime_core.verify_file_sha256(dest, expected)
+        except Exception:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         if len(to_download) > 1:
             time.sleep(3)
 
@@ -552,6 +596,7 @@ def _download_with_rate_limit(url: str, dest: Path):
             ok(f"Guardado: {dest.name}")
         else:
             warn(f"Falló descarga: {dest.name}")
+            raise RuntimeError(f"Falló descarga: {dest.name}")
     else:
         _download(url, dest)
 
@@ -573,6 +618,7 @@ def _download(url: str, dest: Path):
         ok(f"Guardado: {dest.name}")
     except Exception as e:
         err(f"Error descargando {url}: {e}")
+        raise
 
 
 # ─── OWNER VAULT PROVISIONING ─────────────────────────────────────────────────
@@ -918,6 +964,11 @@ def main():
         subagents_enabled=bool(cfg.get("subagents_enabled", False)),
         subagent_index=subagent_index,
     )
+    # Hardware unlock authorizes this process, not arbitrary local clients.
+    # Hand a short-lived token only to the CLI/browser started by the launcher.
+    bootstrap_token = (
+        gstate.issue_bootstrap_token() if _unlock_source == "yubikey" else None
+    )
     try:
         gateway_server = start_gateway(gstate, background=True)
         ok(f"Gateway listo en http://{cfg['host']}:{gateway_port}")
@@ -941,14 +992,23 @@ def main():
     public = f"http://{cfg['host']}:{gateway_port}"
 
     if args.cli:
-        run_cli_mode(cfg["host"], gateway_port, model_meta, rag=bool(cfg.get("rag_enabled", False)))
+        run_cli_mode(
+            cfg["host"],
+            gateway_port,
+            model_meta,
+            rag=bool(cfg.get("rag_enabled", False)),
+            initial_token=bootstrap_token,
+        )
         shutdown()
         return
 
     if not args.no_browser:
         info(f"Abriendo: {public}")
         time.sleep(0.5)
-        webbrowser.open(public)
+        browser_url = (
+            f"{public}#token={bootstrap_token}" if bootstrap_token else public
+        )
+        webbrowser.open(browser_url)
 
     p(f"\n  Gateway (UI+API)  {public}", G)
     p(f"  OpenAI-compatible {public}/v1", C)

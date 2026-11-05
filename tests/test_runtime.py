@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,17 +77,44 @@ class TestRuntimeComposition(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_invalid_hooks_fail_closed(self):
+    def test_invalid_hooks_do_not_disable_permissions(self):
         warnings = []
         runtime = build_runtime(
-            {"hooks": {"pre_tool": [{"args": []}]}},
+            {
+                "hooks": {"pre_tool": [{"args": []}]},
+                "tool_permissions": {"rules": {"write_file": "deny"}},
+            },
             self.root,
             on_warning=warnings.append,
         )
         try:
             self.assertIsNone(runtime.hooks)
-            self.assertIsNone(runtime.permissions)
+            self.assertIsNotNone(runtime.permissions)
+            self.assertFalse(runtime.permissions.allowed("write_file"))
             self.assertTrue(warnings)
+        finally:
+            runtime.close()
+
+    def test_invalid_permissions_load_deny_all(self):
+        warnings = []
+        runtime = build_runtime(
+            {"tool_permissions": {"default": "invalid"}},
+            self.root,
+            on_warning=warnings.append,
+        )
+        try:
+            self.assertEqual(runtime.permissions.default, "deny")
+            self.assertFalse(runtime.permissions.allowed("read_file"))
+            self.assertFalse(runtime.permissions.allowed("mcp__fake__echo"))
+            self.assertTrue(any("deny-all" in item for item in warnings))
+        finally:
+            runtime.close()
+
+    def test_mcp_tools_require_explicit_permission(self):
+        runtime = build_runtime({}, self.root)
+        try:
+            self.assertTrue(runtime.permissions.allowed("read_file"))
+            self.assertFalse(runtime.permissions.allowed("mcp__fake__echo"))
         finally:
             runtime.close()
 
@@ -228,6 +256,30 @@ class TestHttpModelClient(unittest.TestCase):
         client = HttpModelClient(self.base, model="fallback", timeout=5)
         client.chat_completion("chosen", [])
         self.assertEqual(_LlmStub.payload["model"], "chosen")
+
+    def test_chat_completion_does_not_follow_redirects(self):
+        class _RedirectStub(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/secret")
+                self.end_headers()
+
+            def log_message(self, *args):
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), _RedirectStub)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                client2 = HttpModelClient(base, model="fallback", timeout=5)
+                client2.chat_completion("chosen", [])
+            self.assertEqual(ctx.exception.code, 302)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

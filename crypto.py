@@ -7,6 +7,10 @@ Construction:
   - Cipher: HMAC-SHA256 CTR stream + XOR
   - Integrity: HMAC-SHA256 over version||nonce||ciphertext (Encrypt-then-MAC)
 
+This is a reviewed custom construction required by the stdlib-only runtime
+constraint; it is not a FIPS-validated or standard cipher suite. The audit
+review item E9 remains open for external cryptographic review.
+
 Wire format (v1, base64):
   version(1) || nonce(16) || ciphertext || mac(32)
 Legacy format (v0, no MAC) is rejected by default and only decryptable with
@@ -27,7 +31,7 @@ import struct
 # value is kept only to read vaults created by rc.3 and older; those vaults are
 # re-encrypted at the current cost on the first successful unlock.
 ENC_ITERATIONS = 600_000
-AUTH_ITERATIONS = 600_000
+AUTH_ITERATIONS = ENC_ITERATIONS
 LEGACY_ENC_ITERATIONS = 100_000
 MIN_ENC_ITERATIONS = 100_000
 MAX_ENC_ITERATIONS = 2_000_000

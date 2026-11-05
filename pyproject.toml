@@ -36,7 +36,7 @@ select = [
 name = "bonsai-portable"
 version = "1.0.0rc5"
 description = "Local-first, stdlib-only portable AI agent runtime"
-requires-python = ">=3.11"
+requires-python = ">=3.11.4"
 license = { text = "MIT" }
 
 [tool.mypy]
@@ -81,7 +81,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 60
+fail_under = 64
 skip_covered = true
 exclude_lines = [
   "pragma: no cover",
@@ -114,7 +114,12 @@ source_modules = ["local_memory", "experience_store", "maintenance", "audit_work
 forbidden_modules = ["gateway", "acp_server", "launcher"]
 
 [[tool.importlinter.contracts]]
-name = "ACP must not import the HTTP gateway"
+name = "Production must not import legacy modules"
 type = "forbidden"
-source_modules = ["acp_server"]
-forbidden_modules = ["gateway"]
+source_modules = [
+  "gateway", "runtime", "tools", "mcp_client", "permissions", "runtime_core",
+  "model_client", "session_auth", "hooks", "skills", "subagents",
+  "plugin_adapters", "context_builder", "agents_md", "acp_server", "launcher",
+  "runtime_core",
+]
+forbidden_modules = ["agentportable", "knowledge_db", "linter", "execution_loop"]

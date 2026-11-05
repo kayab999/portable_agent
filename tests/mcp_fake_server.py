@@ -3,6 +3,9 @@
 import json
 import sys
 
+# Legacy servers may not answer unknown pre-initialize methods at all.
+IGNORE_DISCOVER = "--ignore-discover" in sys.argv
+
 TOOLS = [
     {
         "name": "echo",
@@ -69,6 +72,8 @@ for line in sys.stdin:
                     },
                 }
             )
+    elif method == "server/discover" and IGNORE_DISCOVER:
+        continue
     elif request_id is not None:
         send(
             {

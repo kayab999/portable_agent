@@ -3,8 +3,8 @@
 ## Inicio rápido
 
 ```bash
-# 1) Dependencias: Python 3.11+, binario llama-server y un .gguf
-python3 launcher.py --setup          # descarga binario + modelos (interactivo)
+# 1) Dependencias: Python 3.11.4+, binario llama-server y un .gguf
+python3 launcher.py --setup          # descarga binario + modelos (interactivo, verifica SHA-256)
 
 # 2) Crear el vault del propietario (solo la primera vez)
 python3 launcher.py --set-password
@@ -14,7 +14,8 @@ python3 launcher.py --set-password
 ./start.sh --cli                     # solo terminal
 ./start.sh -m /ruta/otro.gguf        # cualquier .gguf
 BONSAI_DEBUG=1 ./start.sh            # dev: auth off, power tools on
-BONSAI_POWER_TOOLS=1 ./start.sh      # python_exec / shell / fetch_url
+BONSAI_POWER_TOOLS=1 ./start.sh      # shell / fetch_url
+BONSAI_UNSAFE_PYTHON_EXEC=1 ./start.sh  # además permite python_exec sin aislamiento
 
 # Diagnóstico local (Python, modelo, binario, vault, RAG, puerto)
 python3 launcher.py --doctor
@@ -40,16 +41,19 @@ subagentes) vive en `runtime.py` y la comparten el launcher y ACP.
   canary Encrypt-then-MAC. La rotación es un solo `os.replace` atómico.
 - PBKDF2-HMAC-SHA256 usa 600.000 iteraciones. Los vaults rc.3 (salt/canary
   separados, 100k) siguen funcionando y se migran al primer desbloqueo.
-- El desbloqueo tiene rate limit (5 intentos/minuto).
+- El desbloqueo tiene rate limit (5 intentos/minuto) por cliente.
 - `/api/*` y `/v1/*` requieren bearer. `/health` y `/api/health` son públicos.
+- Emitir un token requiere un bearer válido o la contraseña del vault. Un
+  proceso meramente desbloqueado (por ejemplo YubiKey) no autoriza a clientes
+  locales a emitir tokens.
+- Para desbloqueo por hardware, el launcher entrega un token de corta duración
+  solo al CLI/navegador que arranca.
 - CORS y Host se limitan al origen loopback del gateway.
 - `--yubikey` verifica la respuesta contra el vault; si falla, el servidor queda
   bloqueado. Solo funciona si el vault se creó con esa misma respuesta: trátalo
   como experimental.
 - `BONSAI_INSECURE=1` es el único bypass de auth y lo anuncia en consola.
 - `--cli` pide la contraseña del vault si el servidor está bloqueado.
-- Una sesión ya desbloqueada puede emitir tokens nuevos (nueva pestaña/CLI) sin
-  repetir la contraseña hasta reiniciar el proceso.
 
 ## Estado de funcionalidades
 
@@ -62,13 +66,13 @@ subagentes) vive en `runtime.py` y la comparten el launcher y ACP.
 | CORS/Host endurecido | Funciona |
 | CSP sin scripts inline | Funciona (`script-src 'self'`) |
 | Herramientas read/write/list/stats | Funciona |
-| `python_exec` (AST sandbox) | Funciona, restrictivo a propósito |
+| `python_exec` (opt-in, sin aislamiento OS) | Funciona; requiere gate unsafe aparte |
 | `execute_command` / `fetch_url` | Funciona, power-gated |
 | Allowlists de persona | Funciona |
 | Protocolo `<tool_call>` | Funciona, estricto por defecto |
 | AGENTS.md | Funciona, solo lectura, tope 32 KB |
 | Agent Skills (`SKILL.md`) | Funciona, solo lectura; scripts nunca se ejecutan |
-| MCP stdio | Opt-in (`mcp_enabled`), namespaced y allowlisted |
+| MCP stdio | Opt-in (`mcp_enabled`), protocolo `2026-07-28` + fallback legacy, namespaced y allowlisted |
 | MCP HTTP/OAuth | No implementado |
 | Hooks de ciclo de vida | Opt-in (`hooks.enabled`), sin shell, pre-eventos fail-closed |
 | Permisos por tool (`allow`/`ask`/`deny`) | Funciona; `ask` falla cerrado en headless |
@@ -166,15 +170,25 @@ con una clave de idempotencia; la reflexión no se inventa.
 - Escritura: solo `workspace/`.
 - Lectura: `workspace/`, `docs/` y `data/KAYAB_DATASETS` si existe.
 - `execute_command`: whitelist `cat/ls/grep/echo/head/tail/wc`, cwd workspace,
-  sin shell, argumentos con path-jail.
-- `python_exec`: AST allowlist, imports limitados, `python -I`; bloquea
-  `os`, `open`, `eval`, `exec`, dunders.
-- `fetch_url`: bloquea loopback/privado/link-local/metadata y revalida redirects.
-- Power tools requieren `BONSAI_POWER_TOOLS=1` o `BONSAI_DEBUG=1`.
+  sin shell, flags allowlisted y cada argumento de path (incluidos nombres
+  relativos sin `/` y symlinks) se resuelve bajo las raíces de lectura.
+- `python_exec`: deshabilitado por defecto; requiere
+  `BONSAI_UNSAFE_PYTHON_EXEC=1` además de power tools. Usa un pre-filtro AST,
+  imports limitados y `python -I`, pero no es un sandbox de sistema operativo:
+  el filtro puede evadirse y no es una frontera de seguridad.
+- `fetch_url`: bloquea loopback/privado/link-local/CGNAT y otras IPs no globales,
+  revalida redirects y limita el cuerpo de respuesta a 1 MiB con marca de truncado.
+- Power tools requieren `BONSAI_POWER_TOOLS=1` o `BONSAI_DEBUG=1`. `python_exec`
+  además requiere `BONSAI_UNSAFE_PYTHON_EXEC=1`.
+- `execute_command` y `python_exec` aplican límites de CPU, memoria, tamaño de
+  archivo, procesos y descriptores cuando la plataforma los soporta.
 - Skills: los directorios de skills son raíces de lectura para `read_file`
   (`references/`, `assets/`); `scripts/` no se ejecuta.
 - MCP: procesos hijos con entorno saneado, sin shell, cwd fijado, timeout y
-  tope de salida. Las descripciones y resultados MCP son contenido no confiable.
+  tope de salida. El cliente usa `server/discover` y `_meta` por petición en
+  `2026-07-28`, con fallback al handshake legacy `initialize`. Un
+  `tools_allow: []` explícito no expone ninguna tool. Las descripciones y
+  resultados MCP son contenido no confiable.
 - Hooks: comandos locales declarados solo por el propietario, sin shell, con
   entorno saneado (no se filtran secretos), timeout y tope de salida. `user_prompt`,
   `pre_llm` y `pre_tool` fallan cerrados ante timeout o error de arranque.

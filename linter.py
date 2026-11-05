@@ -1,5 +1,11 @@
+import os
 import re
 import tomllib
+
+if os.environ.get("BONSAI_LEGACY_PATHS") != "1" and __name__ != "__main__":
+    raise RuntimeError(
+        "Legacy module disabled by default. Set BONSAI_LEGACY_PATHS=1 to load it."
+    )
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum

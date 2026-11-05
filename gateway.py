@@ -40,6 +40,14 @@ DATASETS_DIR = ROOT / "data" / "KAYAB_DATASETS"
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+_DIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirectHandler
+)
+
 # Paths that never require a session token
 PUBLIC_POST_PREFIXES = (
     "/api/session/unlock",
@@ -155,12 +163,27 @@ class GatewayState:
         self.rate_limit = _RateBucket(max_requests=90, window_s=60.0)
         self.chat_rate_limit = _RateBucket(max_requests=30, window_s=60.0)
         self.unlock_rate_limit = _RateBucket(max_requests=5, window_s=60.0)
+        self._unlock_rate_buckets: dict[str, _RateBucket] = {}
+        self._unlock_rate_lock = threading.Lock()
 
     def unlocked(self) -> bool:
         return bool(self.is_unlocked() or self._session_unlocked)
 
     def mark_unlocked(self) -> None:
         self._session_unlocked = True
+
+    def allow_unlock_rate(self, key: str | None = None) -> bool:
+        """Per-client unlock rate limit, so one client cannot exhaust it."""
+        bucket_key = key or "unknown"
+        with self._unlock_rate_lock:
+            bucket = self._unlock_rate_buckets.get(bucket_key)
+            if bucket is None:
+                bucket = _RateBucket(max_requests=5, window_s=60.0)
+                self._unlock_rate_buckets[bucket_key] = bucket
+                if len(self._unlock_rate_buckets) > 1024:
+                    self._unlock_rate_buckets.clear()
+                    self._unlock_rate_buckets[bucket_key] = bucket
+        return bucket.allow()
 
     @property
     def allowed_origins(self) -> frozenset[str]:
@@ -183,8 +206,9 @@ class GatewayState:
             hosts.add(f"{self.host.lower()}:{p}")
         return frozenset(hosts)
 
-    def issue_bootstrap_token(self) -> str:
-        return self.sessions.issue()
+    def issue_bootstrap_token(self, ttl: int = 120) -> str:
+        """Issue a short-lived token for an in-process client handoff."""
+        return self.sessions.issue(ttl=ttl)
 
 
 def _confined_index_path(source: str | Path) -> Path | None:
@@ -358,7 +382,7 @@ def make_handler(state: GatewayState):
                 headers["Content-Type"] = ct
             req = urllib.request.Request(url, data=body, headers=headers, method=method)
             try:
-                with urllib.request.urlopen(req, timeout=300) as resp:
+                with _DIRECT_OPENER.open(req, timeout=300) as resp:
                     data = resp.read()
                     self.send_response(resp.status)
                     for key in ("Content-Type", "Content-Length"):
@@ -419,7 +443,7 @@ def make_handler(state: GatewayState):
             if path == "/api/health":
                 llm_ok = False
                 try:
-                    with urllib.request.urlopen(
+                    with _DIRECT_OPENER.open(
                         f"{state.llm_base}/health", timeout=2
                     ) as resp:
                         llm_ok = resp.status == 200
@@ -645,7 +669,8 @@ def make_handler(state: GatewayState):
 
         def _handle_session_unlock(self) -> None:
             """Issue a token only for a verified credential or explicit bypass."""
-            if not self._require_rate(state.unlock_rate_limit):
+            if not state.allow_unlock_rate(self.client_address[0]):
+                self._json(429, {"error": "rate_limited", "message": "Too many requests"})
                 return
             try:
                 data = self._read_json()
@@ -660,9 +685,11 @@ def make_handler(state: GatewayState):
                 self._issue_unlock_token()
                 return
 
-            # A verified YubiKey at launch, or a session already unlocked by a
-            # password in this process, can mint additional tokens.
-            if state.unlocked():
+            # Re-mint for an already authenticated client. Process-level unlock
+            # state (for example a YubiKey at launch) is NOT sufficient: local
+            # processes must not be able to mint tokens just because the
+            # gateway is unlocked.
+            if self._auth_ok():
                 self._issue_unlock_token()
                 return
 

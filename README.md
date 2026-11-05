@@ -18,7 +18,7 @@ Version: `1.0.0-rc.5` (see `VERSION`).
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.11.4+ (tarfile extraction filter and stdlib APIs)
 - A `llama-server` binary for your platform (`python launcher.py --setup`)
 - At least one `.gguf` model under `models/`
 
@@ -45,11 +45,13 @@ The gateway serves the UI at `http://127.0.0.1:8080` and proxies inference at
 ```bash
 BONSAI_DEBUG=1 ./start.sh          # no auth, direct tools, power tools
 BONSAI_INSECURE=1 ./start.sh       # issues tokens without a password (dev only)
-BONSAI_POWER_TOOLS=1 ./start.sh    # enable python_exec / shell / fetch_url
+BONSAI_POWER_TOOLS=1 ./start.sh    # enable shell / fetch_url
+BONSAI_UNSAFE_PYTHON_EXEC=1 ./start.sh  # also allow non-isolated python_exec
 ```
 
 `BONSAI_DEBUG=1` and `BONSAI_INSECURE=1` print a loud warning and must not be
-used for a distributed build.
+used for a distributed build. `python_exec` is not an OS sandbox and stays
+disabled even with power tools unless `BONSAI_UNSAFE_PYTHON_EXEC=1` is set.
 
 ## Authentication
 
@@ -64,8 +66,11 @@ Production boots **locked**:
   (separate salt/canary files at 100k iterations) still unlock and are
   re-encrypted at the current cost on first successful verification.
 - Unlock is rate-limited (5 attempts/minute) and returns a bearer token.
-- Once a session is unlocked, a new tab or the CLI can mint a token without
-  repeating the password until the process restarts.
+- A client holding a valid token can mint another token. Without one,
+  `POST /api/session/unlock` requires the vault password; process-level unlock
+  state alone (including YubiKey auto-unlock) is not authorization.
+- For hardware unlock, the launcher hands a short-lived token only to the
+  CLI/browser it starts; the public endpoint never mints from unlock state.
 - `./start.sh --cli` prompts for the vault password when the server is locked.
 - `/api/*` and `/v1/*` require that token. `/health` and `/api/health` are public.
 - CORS and Host headers are restricted to the gateway's own loopback origin.
@@ -86,7 +91,7 @@ Tokens live in RAM only and expire after 24 hours (or on restart).
 | Password vault / session auth | Working |
 | Origin/Host hardening | Working |
 | Sandboxed read/write/list/stats tools | Working |
-| `python_exec` AST sandbox | Working, intentionally restrictive |
+| `python_exec` (opt-in, no OS isolation) | Working; separate unsafe gate |
 | `execute_command` / `fetch_url` | Working, power-gated |
 | Persona tool allowlists | Working |
 | Canonical `<tool_call>` protocol | Working, strict by default |
@@ -142,8 +147,19 @@ Example MCP configuration:
 }
 ```
 
+The client speaks MCP `2026-07-28`: it probes with `server/discover`, sends
+protocol version, client identity and capabilities in per-request `_meta`, and
+enforces `resultType`. If a stdio server does not implement the modern
+revision, the client falls back to the legacy `initialize` handshake. A
+recognized modern error never triggers that fallback.
+
+`tools_allow` is optional. Omit it to expose every tool advertised by the
+server; an explicit empty list exposes none. Calls for tools that were not
+advertised or not allowlisted are rejected even if invoked directly.
+
 MCP tool descriptions and results are treated as untrusted content. Every call
-is gated by the configured server allowlist and by the active persona.
+is gated by the configured server allowlist, the permission policy and the
+active persona.
 
 ## Hooks and permissions
 
@@ -181,6 +197,11 @@ create or alter them.
   errors. Post-events do not block.
 - `ask` requires interactive approval; headless gateway and ACP turns treat it
   as `deny` unless the tool is listed in `auto_approve`.
+- Hooks and permissions load independently. An invalid hook configuration never
+  disables the permission policy; an invalid permission configuration falls
+  back to a deny-all policy.
+- MCP tools (`mcp__*`) are denied unless a rule explicitly allows them. A
+  missing policy never authorizes an external tool.
 
 ## Plugins and subagents
 
@@ -241,10 +262,18 @@ has no remote agent transport.
   operation (WAL + busy timeout), so concurrent requests are safe.
 - Read roots: `workspace/`, `docs/`, and `data/KAYAB_DATASETS` when it exists.
   Write root: `workspace/`.
-- Subprocess tools use a command whitelist without interpreters and a workspace
-  cwd. `python_exec` uses an AST allowlist and `python -I`.
-- SSRF protection blocks loopback, private, link-local, and metadata addresses,
-  including after redirects.
+- Subprocess tools use a command whitelist without interpreters, an allowlisted
+  flag set, and a workspace cwd. Every path argument, including bare relative
+  names and symlink targets, is resolved and must stay under the read roots.
+  `python_exec` is opt-in via `BONSAI_UNSAFE_PYTHON_EXEC=1`; it uses an AST
+  pre-filter and `python -I` but has no OS isolation, so the filter is not a
+  security boundary against arbitrary Python.
+- SSRF protection blocks loopback, private, link-local, CGNAT and other
+  non-global destinations. Redirects are followed manually and validated before
+  each connection; the socket connects to the validated IP while TLS keeps the
+  original hostname for SNI and certificate verification. Environment proxies
+  are not used by `fetch_url`, redirects share one timeout budget, and response
+  bodies are capped at 1 MiB with a truncation flag.
 - Tool JSON is only executed from explicit `<tool_call>...</tool_call>` blocks.
   Fenced code and standalone JSON lines are ignored unless
   `BONSAI_LEGACY_TOOL_PARSING=1` is set.

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from permissions import PermissionPolicy
 from tools import get_toolbox
 
 
@@ -129,19 +130,23 @@ def build_runtime(
         except Exception as exc:
             warn(f"MCP deshabilitado por error: {exc}")
 
+    hooks = None
     try:
         from hooks import HookManager
-        from permissions import PermissionPolicy
 
         hooks = HookManager.from_config(config.get("hooks"), cwd=root)
-        permissions = PermissionPolicy.from_config(config.get("tool_permissions"))
         if hooks.enabled:
             active = sum(len(items) for items in hooks.specs.values())
             info(f"Hooks: {active} declarados")
     except Exception as exc:
         warn(f"Hooks deshabilitados por error: {exc}")
         hooks = None
-        permissions = None
+
+    try:
+        permissions = PermissionPolicy.from_config(config.get("tool_permissions"))
+    except Exception as exc:
+        warn(f"Permisos en deny-all por error de configuración: {exc}")
+        permissions = PermissionPolicy.deny_all()
 
     return Runtime(
         toolbox=toolbox,

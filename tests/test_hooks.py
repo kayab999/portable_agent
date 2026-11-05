@@ -164,6 +164,7 @@ class TestHooks(unittest.TestCase):
             self.toolbox,
             registry=FakeRegistry(),
             hooks=manager,
+            permissions=PermissionPolicy.from_config({"rules": {"mcp__*": "allow"}}),
         )
         self.assertTrue(results[0]["ok"])
         self.assertEqual(marker.read_text(), "mcp__fake__echo")
@@ -209,8 +210,35 @@ class TestPermissions(unittest.TestCase):
         self.assertFalse(policy.allowed("mcp__fake__echo"))
         self.assertTrue(policy.allowed("read_file"))
 
-    def test_default_policy_is_allow(self):
-        self.assertTrue(PermissionPolicy.from_config({}).allowed("read_file"))
+    def test_default_policy_allows_builtin_but_denies_mcp(self):
+        policy = PermissionPolicy.from_config({})
+        self.assertTrue(policy.allowed("read_file"))
+        self.assertFalse(policy.allowed("mcp__fake__echo"))
+
+    def test_invalid_decision_is_rejected(self):
+        with self.assertRaises(ValueError):
+            PermissionPolicy.from_config({"rules": {"read_file": "allow-all"}})
+
+    def test_deny_all_blocks_execution(self):
+        results = execute_tool_calls(
+            [{"tool": "write_file", "args": {"path": "x.txt", "content": "x"}}],
+            self.toolbox,
+            permissions=PermissionPolicy.deny_all(),
+        )
+        self.assertEqual(results[0]["error"], "tool_denied_by_policy")
+        self.assertFalse((self.tmp / "workspace" / "x.txt").exists())
+
+    def test_missing_policy_still_denies_mcp(self):
+        class FakeRegistry:
+            def call(self, name, args):
+                return {"tool": name, "ok": True}
+
+        results = execute_tool_calls(
+            [{"tool": "mcp__fake__echo", "args": {}}],
+            self.toolbox,
+            registry=FakeRegistry(),
+        )
+        self.assertEqual(results[0]["error"], "tool_denied_by_policy")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,18 @@ import urllib.request
 from typing import Protocol
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not follow redirects from the internal LLM endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_DIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirectHandler
+)
+
+
 class ModelClient(Protocol):
     def chat_completion(self, model: str, messages: list[dict]) -> dict: ...
 
@@ -40,7 +52,7 @@ class HttpModelClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with _DIRECT_OPENER.open(request, timeout=self.timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         content = data["choices"][0]["message"]["content"]
         return {"content": content, "raw": data}

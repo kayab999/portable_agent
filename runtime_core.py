@@ -125,6 +125,35 @@ def _download_stream(url: str, dest: Path, progress_cb=None) -> None:
                 progress_cb(done, total)
 
 
+def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a file incrementally without loading it into memory."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_file_sha256(path: Path, expected: str) -> str:
+    """Fail closed unless ``path`` matches the expected SHA-256 digest."""
+    normalized = (expected or "").strip().lower()
+    if normalized.startswith("sha256:"):
+        normalized = normalized[len("sha256:"):]
+    if len(normalized) != 64 or any(
+        c not in "0123456789abcdef" for c in normalized
+    ):
+        raise RuntimeError(f"SHA-256 esperado inválido para {Path(path).name}")
+    actual = file_sha256(path)
+    if actual != normalized:
+        raise RuntimeError(
+            f"SHA-256 no coincide para {Path(path).name}: "
+            f"esperado {normalized}, obtenido {actual}"
+        )
+    return actual
+
+
 def _extract_archive(archive: Path, exe_name: str, dest_dir: Path) -> None:
     """Extrae el release completo y deja el binario directamente en dest_dir.
 
@@ -156,7 +185,7 @@ def _extract_archive(archive: Path, exe_name: str, dest_dir: Path) -> None:
             if item.is_file() and "." not in item.name:
                 (dest_dir / item.name).chmod(0o755)
     exe_dest = dest_dir / exe_name
-    if os.name != "windows":
+    if os.name != "nt":
         exe_dest.chmod(0o755)
 
 
@@ -187,8 +216,9 @@ def download_server_binary(
 ) -> Path:
     """Descarga e instala llama-server desde el release oficial del fork PrismML.
 
-    Verificación opcional: si BONSAI_BIN_SHA256 está definido, el hash del
-    archivo descargado debe coincidir (fail-closed).
+    Verificación obligatoria: se usa el ``digest`` SHA-256 publicado por el
+    release de GitHub. ``BONSAI_BIN_SHA256`` puede fijar otro hash explícito.
+    Si no hay ninguno, la descarga falla cerrada.
     """
     suffix = _asset_suffix(os_key, arch_key)
     if not suffix:
@@ -207,23 +237,20 @@ def download_server_binary(
             f"({BIN_DOCS_URL})"
         )
 
-    expected = os.environ.get("BONSAI_BIN_SHA256", "").lower()
+    expected = os.environ.get("BONSAI_BIN_SHA256", "").strip().lower() or (
+        str(asset.get("digest") or "").strip().lower()
+    )
 
     # 2) descarga a temp + verificación + extracción
-    import hashlib
-
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / asset["name"]
         _download_stream(asset["browser_download_url"], tmp, progress_cb)
-        if expected:
-            digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
-            if digest != expected:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"SHA-256 no coincide para {asset['name']}: "
-                    f"esperado {expected}, obtenido {digest}"
-                )
-            del digest
+        if not expected:
+            raise RuntimeError(
+                f"El release no publica SHA-256 para {asset['name']}; "
+                "define BONSAI_BIN_SHA256 para verificar la descarga"
+            )
+        verify_file_sha256(tmp, expected)
         exe = server_exe_name(os_key)
         dest_dir = bin_dir / os_key / arch_key
         _extract_archive(tmp, exe, dest_dir)

@@ -6,6 +6,11 @@ y abre la interfaz web. Funciona en Linux, Windows y macOS.
 """
 
 import os
+
+if os.environ.get("BONSAI_LEGACY_PATHS") != "1" and __name__ != "__main__":
+    raise RuntimeError(
+        "Legacy module disabled by default. Set BONSAI_LEGACY_PATHS=1 to load it."
+    )
 import sys
 import json
 import time
@@ -395,6 +400,7 @@ MODEL_CATALOG = {
         "profile": "thesis",
         "ctx": 65536,
         "hf_url": "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf",
+        "sha256": "284a335aa3fb2ced3b1b01fcb40b08aa783e3b70832767f0dd2e3fdfa134bd54",
     },
 }
 

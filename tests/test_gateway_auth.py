@@ -82,21 +82,37 @@ class TestGatewayAuth(unittest.TestCase):
         status, data = self._req("POST", "/api/session/unlock", body={})
         self.assertEqual(status, 403)
 
-    def test_unlock_when_unlocked_issues_token(self):
+    def test_unlock_when_unlocked_requires_credential(self):
         self.state.is_unlocked = lambda: True
         status, data = self._req("POST", "/api/session/unlock", body={})
+        self.assertEqual(status, 403)
+        self.assertNotIn("token", data)
+
+        token = self.sessions.issue()
+        status, data = self._req(
+            "POST", "/api/session/unlock", body={}, token=token
+        )
         self.assertEqual(status, 200)
         self.assertTrue(data.get("token"))
-        token = data["token"]
-        st2, d2 = self._req("GET", "/api/identity", token=token)
-        self.assertEqual(st2, 200)
-        self.assertIn("needs_setup", d2)
 
     def test_confined_index_path_blocks_etc(self):
         self.assertIsNone(_confined_index_path("/etc"))
         self.assertIsNone(_confined_index_path("/etc/passwd"))
 
-    def test_confined_index_path_allows_docs(self):
+    def test_unlock_rate_limit_is_per_client(self):
+        state = GatewayState(
+            llm_base="http://127.0.0.1:9",
+            debug_mode=False,
+            is_unlocked=lambda: False,
+            host="127.0.0.1",
+            port=0,
+            auth_required=True,
+        )
+        for _ in range(5):
+            self.assertTrue(state.allow_unlock_rate("client-a"))
+        self.assertFalse(state.allow_unlock_rate("client-a"))
+        # A different client still has its own budget.
+        self.assertTrue(state.allow_unlock_rate("client-b"))
         docs = Path(__file__).resolve().parents[1] / "docs"
         if docs.exists():
             p = _confined_index_path(str(docs))

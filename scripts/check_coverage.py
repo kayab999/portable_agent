@@ -25,19 +25,19 @@ FLOORS = {
     "crypto.py": 75,
     "mcp_client.py": 75,
     "acp_server.py": 65,
-    "tools.py": 55,
-    "gateway.py": 55,
+    "tools.py": 60,
+    "gateway.py": 58,
     "subagents.py": 75,
     "config_schema.py": 70,
     "bonsai_logging.py": 80,
     "maintenance.py": 55,
     "runtime.py": 70,
-    "model_client.py": 60,
+    "model_client.py": 90,
     "audit_worker.py": 55,
     "doctor.py": 55,
 }
 
-OVERALL_FLOOR = 60
+OVERALL_FLOOR = 64
 
 
 def main() -> int:

@@ -171,16 +171,58 @@ class TestFailClosed(_GatewayCase):
         self.assertEqual(status, 200)
         self.assertTrue(data.get("unlocked"))
 
-    def test_session_unlock_can_mint_token_without_repeating_password(self):
+    def test_unlock_after_password_does_not_mint_without_token(self):
         self.vault.provision("correct horse battery")
         status, data, _ = self.req(
             "POST", "/api/session/unlock", {"password": "correct horse battery"}
         )
         self.assertEqual(status, 200)
-        self.assertTrue(data.get("token"))
+        token = data.get("token")
+        self.assertTrue(token)
+
+        # E2: process unlock state alone must not mint tokens for local clients.
         status, data, _ = self.req("POST", "/api/session/unlock", {})
+        self.assertEqual(status, 403)
+        self.assertNotIn("token", data)
+
+        # An already authenticated client may rotate/mint a new token.
+        status, data, _ = self.req(
+            "POST", "/api/session/unlock", {}, token=token
+        )
+        self.assertEqual(status, 200)
+        token2 = data.get("token")
+        self.assertTrue(token2)
+        self.assertNotEqual(token2, token)
+        status, data, _ = self.req("GET", "/api/identity", token=token2)
+        self.assertEqual(status, 200)
+        self.assertIn("needs_setup", data)
+
+    def test_process_unlock_alone_cannot_mint_token(self):
+        self.state.mark_unlocked()
+        self.assertTrue(self.state.unlocked())
+        status, data, _ = self.req("POST", "/api/session/unlock", {})
+        self.assertEqual(status, 403)
+        self.assertNotIn("token", data)
+
+        token = self.sessions.issue()
+        status, data, _ = self.req(
+            "POST", "/api/session/unlock", {}, token=token
+        )
         self.assertEqual(status, 200)
         self.assertTrue(data.get("token"))
+
+    def test_launcher_bootstrap_token_can_exchange_for_session(self):
+        self.vault.provision("correct horse battery")
+        bootstrap = self.state.issue_bootstrap_token(ttl=120)
+        status, data, _ = self.req(
+            "POST", "/api/session/unlock", {}, token=bootstrap
+        )
+        self.assertEqual(status, 200)
+        token = data.get("token")
+        self.assertTrue(token)
+        self.assertNotEqual(token, bootstrap)
+        status, data, _ = self.req("GET", "/api/identity", token=token)
+        self.assertEqual(status, 200)
 
     def test_unlock_rate_limit(self):
         self.vault.provision("correct horse battery")
@@ -255,9 +297,16 @@ class TestFailClosed(_GatewayCase):
             server.shutdown()
             server.server_close()
 
-    def test_verified_yubikey_state_issues_token(self):
+    def test_verified_yubikey_state_requires_bootstrap_token(self):
         self.state.is_unlocked = lambda: True
         status, data, _ = self.req("POST", "/api/session/unlock", {})
+        self.assertEqual(status, 403)
+        self.assertNotIn("token", data)
+
+        bootstrap = self.state.issue_bootstrap_token(ttl=120)
+        status, data, _ = self.req(
+            "POST", "/api/session/unlock", {}, token=bootstrap
+        )
         self.assertEqual(status, 200)
         self.assertTrue(data.get("token"))
 

@@ -135,6 +135,33 @@ class TestPluginAdapters(unittest.TestCase):
         self.assertFalse(disabled[0]["enabled"])
         self.assertTrue(enabled[0]["enabled"])
 
+    def test_mcp_tools_allow_preserves_omitted_vs_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "name": "allow-demo",
+                        "mcpServers": {
+                            "omitted": {"command": "echo"},
+                            "empty": {"command": "echo", "tools_allow": []},
+                            "listed": {
+                                "command": "echo",
+                                "tools_allow": ["echo"],
+                            },
+                        },
+                    }
+                )
+            )
+            plugin = load_plugin(root)
+        by_name = {
+            server["name"].split("__", 1)[1]: server
+            for server in plugin.mcp_servers
+        }
+        self.assertNotIn("tools_allow", by_name["omitted"])
+        self.assertEqual(by_name["empty"]["tools_allow"], [])
+        self.assertEqual(by_name["listed"]["tools_allow"], ["echo"])
+
     def test_missing_manifest_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(PluginError):

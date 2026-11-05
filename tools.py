@@ -7,7 +7,8 @@ Security model:
   WRITE roots: workspace/ only
   READ roots:  workspace/ + docs/ + data/KAYAB_DATASETS (read-only)
   Subprocess:  cwd=workspace, command whitelist, path-jailed args, no shell
-  python_exec: AST import/name allowlist + isolated subprocess (-I)
+  python_exec: OPT-IN UNSAFE. AST pre-filter + `python -I`, with no OS
+    isolation. Disabled unless BONSAI_UNSAFE_PYTHON_EXEC=1 is set explicitly.
   execute_tool_calls: explicit ALLOWED_TOOLS (not every method on Toolbox)
   POWER_TOOLS (execute_command, python_exec, fetch_url): require BONSAI_POWER_TOOLS=1
     unless BONSAI_DEBUG=1 (dev). Distill/diagnose always available if in ALLOWED_TOOLS.
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import http.client
 import io
 import ipaddress
 import json
@@ -24,11 +26,11 @@ import os
 import re
 import shlex
 import socket
+import ssl
 import subprocess
 import tempfile
-import urllib.error
+import time
 import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,74 @@ POWER_TOOLS = frozenset({"execute_command", "python_exec", "fetch_url"})
 COMMAND_WHITELIST = frozenset(
     {"cat", "ls", "grep", "echo", "head", "tail", "wc"}
 )
+
+# Only these flags are accepted. Anything else is rejected, so flags cannot
+# smuggle a filename (for example `grep -f secret` or `wc --files0-from=secret`).
+COMMAND_SAFE_FLAGS = {
+    "cat": frozenset(
+        {
+            "-n", "-b", "-s", "-E", "-T", "-A", "-v",
+            "--number", "--number-nonblank", "--squeeze-blank",
+            "--show-ends", "--show-tabs", "--show-all", "--show-nonprinting",
+        }
+    ),
+    "ls": frozenset(
+        {
+            "-l", "-a", "-A", "-h", "-R", "-1", "-d", "-i", "-s", "-S",
+            "-t", "-r", "-F", "-p", "-q", "--color", "--color=auto",
+            "--color=always", "--color=never",
+        }
+    ),
+    "grep": frozenset(
+        {
+            "-i", "-v", "-n", "-H", "-h", "-c", "-l", "-L", "-w", "-x",
+            "-o", "-q", "-s", "-E", "-F", "-G", "-P", "-m", "-A", "-B",
+            "-C", "--ignore-case", "--invert-match", "--line-number",
+            "--with-filename", "--no-filename", "--count",
+            "--files-with-matches", "--files-without-match",
+            "--word-regexp", "--line-regexp", "--only-matching",
+            "--quiet", "--no-messages", "--extended-regexp",
+            "--fixed-strings", "--basic-regexp", "--perl-regexp",
+            "--max-count", "--after-context", "--before-context", "--context",
+        }
+    ),
+    "echo": frozenset({"-n", "-e", "-E"}),
+    "head": frozenset(
+        {
+            "-n", "-c", "-q", "-v",
+            "--lines", "--bytes", "--quiet", "--verbose",
+        }
+    ),
+    "tail": frozenset(
+        {
+            "-n", "-c", "-q", "-v", "-f", "-F",
+            "--lines", "--bytes", "--follow", "--retry",
+            "--quiet", "--verbose",
+        }
+    ),
+    "wc": frozenset(
+        {
+            "-l", "-w", "-c", "-m", "-L",
+            "--lines", "--words", "--bytes", "--chars", "--max-line-length",
+        }
+    ),
+}
+
+# Flags above that consume the next argv entry as a value (not a path).
+COMMAND_VALUE_FLAGS = {
+    "cat": frozenset(),
+    "ls": frozenset(),
+    "grep": frozenset(
+        {
+            "-m", "-A", "-B", "-C", "--max-count", "--after-context",
+            "--before-context", "--context",
+        }
+    ),
+    "echo": frozenset(),
+    "head": frozenset({"-n", "-c", "--lines", "--bytes"}),
+    "tail": frozenset({"-n", "-c", "--lines", "--bytes"}),
+    "wc": frozenset(),
+}
 
 # python_exec: only these top-level modules may be imported
 # (no io/pathlib — they expose filesystem primitives)
@@ -166,6 +236,39 @@ def power_tools_enabled() -> bool:
     return dbg in ("1", "true", "yes", "on")
 
 
+def _process_resource_preexec():
+    """Return a preexec_fn that applies modest resource limits, or None."""
+    if os.name == "nt":
+        return None
+    try:
+        import resource
+    except ImportError:
+        return None
+
+    def _limits():
+        try:
+            resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1 * 1024 * 1024, 1 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+        except (ValueError, OSError):
+            # Best effort: limits are defense-in-depth, not correctness.
+            pass
+
+    return _limits
+
+
+def unsafe_python_exec_enabled() -> bool:
+    """True only with an explicit opt-in to non-isolated Python execution.
+
+    ``python_exec`` is not an OS sandbox: the AST filter can be bypassed.
+    Neither ``BONSAI_POWER_TOOLS`` nor ``BONSAI_DEBUG`` is sufficient.
+    """
+    v = os.environ.get("BONSAI_UNSAFE_PYTHON_EXEC", "").lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def confining_read_roots(workspace: Path | None = None) -> tuple[Path, ...]:
     """Canonical roots allowed for read/index operations."""
     ws = (workspace or WORKSPACE).resolve()
@@ -228,7 +331,12 @@ def _command_has_shell_meta(command: str) -> str | None:
 
 def validate_python_code(code: str) -> str | None:
     """
-    AST gate for python_exec.
+    AST pre-filter for python_exec.
+
+    This is a usability/defense-in-depth filter, **not** a security boundary.
+    String-built attribute access and other tricks can bypass it, so
+    ``python_exec`` stays disabled unless ``BONSAI_UNSAFE_PYTHON_EXEC=1``.
+
     Returns None if OK, else a human-readable block reason.
     """
     if not isinstance(code, str) or not code.strip():
@@ -278,59 +386,235 @@ def _fmt_size(size: int) -> str:
     return f"{value:.1f} TB"
 
 
+_SSRF_BLOCKED_HOSTNAMES = frozenset(
+    {"localhost", "metadata", "metadata.google.internal", "0.0.0.0"}
+)
+_SSRF_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_SSRF_MAX_REDIRECTS = 5
+_SSRF_MAX_RESPONSE_BYTES = 1024 * 1024  # 1 MiB
+
+
+class _SSRFError(ValueError):
+    """URL or destination rejected by the SSRF policy."""
+
+
+def _ip_block_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """Return a reason for any non-public destination address."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        mapped_reason = _ip_block_reason(mapped)
+        if mapped_reason:
+            return f"IPv4-mapped no permitida: {mapped}"
+    if (
+        not ip.is_global
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        return f"IP no permitida: {ip}"
+    return None
+
+
+def _normalize_fetch_host(host: str) -> str:
+    """Normalize a URL hostname without weakening literal IP handling."""
+    host = (host or "").strip().rstrip(".").lower()
+    if not host:
+        raise _SSRFError("Host vacío")
+    if "%" in host:
+        raise _SSRFError("Zone IDs no permitidos")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if host in _SSRF_BLOCKED_HOSTNAMES or host.endswith(".local"):
+        raise _SSRFError(f"Host no permitido: {host}")
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise _SSRFError("Hostname inválido") from exc
+
+
+def _parse_fetch_url(url: str) -> tuple[str, str, int, str]:
+    """Parse and validate URL syntax, returning scheme/host/port/target."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise _SSRFError("URL no parseable") from exc
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise _SSRFError("Solo http/https")
+    host = _normalize_fetch_host(parsed.hostname or "")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise _SSRFError("Puerto inválido") from exc
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    if not 1 <= port <= 65535:
+        raise _SSRFError("Puerto fuera de rango")
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    return scheme, host, port, target
+
+
+def _fetch_host_header(host: str, port: int, scheme: str) -> str:
+    default_port = 443 if scheme == "https" else 80
+    display = f"[{host}]" if ":" in host else host
+    return display if port == default_port else f"{display}:{port}"
+
+
+def _resolve_validated_addresses(host: str, port: int) -> list[tuple[int, tuple]]:
+    """Resolve once and return only validated addresses; fail closed on any bad answer."""
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        reason = _ip_block_reason(literal)
+        if reason:
+            raise _SSRFError(reason)
+        family = socket.AF_INET6 if literal.version == 6 else socket.AF_INET
+        sockaddr = (host, port, 0, 0) if family == socket.AF_INET6 else (host, port)
+        return [(family, sockaddr)]
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, OSError) as exc:
+        raise _SSRFError(f"No se pudo resolver: {host}") from exc
+
+    addresses: list[tuple[int, tuple]] = []
+    seen: set[tuple[int, tuple]] = set()
+    for family, _socktype, _proto, _canonname, sockaddr in infos:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        reason = _ip_block_reason(ip)
+        if reason:
+            raise _SSRFError(f"Resuelve a {reason}")
+        key = (family, sockaddr)
+        if key not in seen:
+            seen.add(key)
+            addresses.append(key)
+    if not addresses:
+        raise _SSRFError(f"DNS sin direcciones utilizables: {host}")
+    return addresses
+
+
 def _ssrf_block_reason(url: str) -> str | None:
     """Return block reason if URL targets private/link-local/metadata hosts."""
     try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return "URL no parseable"
-    if parsed.scheme not in ("http", "https"):
-        return "Solo http/https"
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return "Host vacío"
-    blocked_names = {
-        "localhost",
-        "metadata.google.internal",
-        "metadata",
-        "0.0.0.0",
-    }
-    if host in blocked_names or host.endswith(".local"):
-        return f"Host no permitido: {host}"
-    # Literal IPs
-    try:
-        ip = ipaddress.ip_address(host)
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-        ):
-            return f"IP no permitida: {ip}"
-        return None
-    except ValueError:
-        pass
-    # Resolve DNS and check all A/AAAA
-    try:
-        infos = socket.getaddrinfo(host, None)
-        for info in infos:
-            addr = info[4][0]
-            try:
-                ip = ipaddress.ip_address(addr)
-            except ValueError:
-                continue
-            if (
-                ip.is_private
-                or ip.is_loopback
-                or ip.is_link_local
-                or ip.is_reserved
-                or ip.is_multicast
-            ):
-                return f"Resuelve a IP no permitida: {ip}"
-    except socket.gaierror:
-        return f"No se pudo resolver: {host}"
+        _scheme, host, port, _target = _parse_fetch_url(url)
+        _resolve_validated_addresses(host, port)
+    except _SSRFError as exc:
+        return str(exc)
     return None
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection to a validated IP with SNI/verification for the URL hostname."""
+
+    def __init__(self, ip: str, port: int, *, tls_hostname: str, timeout: float):
+        super().__init__(
+            ip,
+            port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._tls_hostname = tls_hostname
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=self._tls_hostname
+        )
+
+
+def _fetch_once(url: str, timeout: float) -> dict:
+    """Perform one GET without redirects, connecting only to a validated address."""
+    scheme, host, port, target = _parse_fetch_url(url)
+    addresses = _resolve_validated_addresses(host, port)
+    headers = {
+        "User-Agent": "BonsaiPortable/1.0",
+        "Host": _fetch_host_header(host, port, scheme),
+        "Accept": "*/*",
+        "Connection": "close",
+    }
+    last_error: Exception | None = None
+    deadline = time.monotonic() + timeout
+    for _family, sockaddr in addresses:
+        attempt_timeout = deadline - time.monotonic()
+        if attempt_timeout <= 0:
+            raise TimeoutError("Presupuesto de tiempo agotado")
+        ip = sockaddr[0]
+        conn = None
+        try:
+            if scheme == "https":
+                conn = _PinnedHTTPSConnection(
+                    ip, port, tls_hostname=host, timeout=attempt_timeout
+                )
+            else:
+                conn = http.client.HTTPConnection(ip, port, timeout=attempt_timeout)
+            conn.request("GET", target, headers=headers)
+            response = conn.getresponse()
+            body = response.read(_SSRF_MAX_RESPONSE_BYTES + 1)
+            truncated = len(body) > _SSRF_MAX_RESPONSE_BYTES
+            if truncated:
+                body = body[:_SSRF_MAX_RESPONSE_BYTES]
+            return {
+                "status": response.status,
+                "reason": response.reason,
+                "headers": {k.lower(): v for k, v in response.getheaders()},
+                "body": body,
+                "truncated": truncated,
+            }
+        except Exception as exc:
+            last_error = exc
+        finally:
+            if conn is not None:
+                conn.close()
+    if last_error is not None:
+        raise last_error
+    raise _SSRFError("Sin direcciones validadas")
+
+
+def _fetch_with_redirects(url: str, timeout: float) -> dict:
+    """Fetch with explicit, validated redirects and a shared time budget."""
+    deadline = time.monotonic() + timeout
+    current = url
+    seen = {current}
+    for redirect_count in range(_SSRF_MAX_REDIRECTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Presupuesto de tiempo agotado")
+        result = _fetch_once(current, remaining)
+        status = result["status"]
+        if status not in _SSRF_REDIRECT_STATUSES:
+            result["url"] = current
+            return result
+        location = result["headers"].get("location")
+        if not location:
+            result["url"] = current
+            return result
+        if redirect_count >= _SSRF_MAX_REDIRECTS:
+            raise _SSRFError("Límite de redirects excedido")
+        next_url = urllib.parse.urljoin(current, location)
+        next_scheme, _host, _port, _target = _parse_fetch_url(next_url)
+        current_scheme = urllib.parse.urlsplit(current).scheme.lower()
+        if current_scheme == "https" and next_scheme == "http":
+            raise _SSRFError("Downgrade HTTPS→HTTP no permitido")
+        if next_url in seen:
+            raise _SSRFError("Bucle de redirects")
+        seen.add(next_url)
+        current = next_url
+    raise _SSRFError("Límite de redirects excedido")
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -435,23 +719,87 @@ class Toolbox:
 
     # ─── SYSTEM ───────────────────────────────────────────────────────────────
 
-    def _validate_command_args(self, cmd_args: list[str]) -> str | None:
-        """Ensure path-like argv entries resolve under workspace (read roots)."""
-        for arg in cmd_args[1:]:
-            if not _looks_like_path_arg(arg):
+    def _arg_names_existing_path(self, arg: str) -> bool:
+        """True when an argv value names an existing filesystem entry."""
+        try:
+            candidate = Path(arg)
+            if not candidate.is_absolute():
+                candidate = self.workspace / candidate
+            return os.path.lexists(candidate)
+        except OSError:
+            return True
+
+    def _prepare_command_args(
+        self, cmd_args: list[str]
+    ) -> tuple[list[str] | None, str | None]:
+        """Validate flags and resolve every path argument under read roots.
+
+        Plain relative names are paths too: a workspace symlink such as
+        ``secret -> /etc/passwd`` must not escape just because it has no ``/``.
+        """
+        name = cmd_args[0]
+        safe_flags = COMMAND_SAFE_FLAGS[name]
+        value_flags = COMMAND_VALUE_FLAGS[name]
+        resolved = [name]
+        positionals: list[tuple[int, str]] = []
+        end_of_options = False
+        i = 1
+        while i < len(cmd_args):
+            arg = cmd_args[i]
+            if not end_of_options and arg == "--":
+                end_of_options = True
+                resolved.append(arg)
+                i += 1
                 continue
-            raw = arg
-            if raw.startswith("~") or "$" in raw or "`" in raw:
-                return f"path no permitido (expansión/tilde): {arg}"
-            if ".." in raw:
-                # Still allow if resolve stays under roots (checked below),
-                # but reject absolute escape attempts with parent segments first.
-                pass
+            if not end_of_options and arg.startswith("-") and arg != "-":
+                if "=" in arg:
+                    if arg not in safe_flags:
+                        return None, f"flag no permitida: {arg}"
+                    resolved.append(arg)
+                    i += 1
+                    continue
+                if arg not in safe_flags:
+                    return None, f"flag no permitida: {arg}"
+                resolved.append(arg)
+                if arg in value_flags:
+                    if i + 1 >= len(cmd_args):
+                        return None, f"falta valor para {arg}"
+                    value = cmd_args[i + 1]
+                    if _looks_like_path_arg(value) or self._arg_names_existing_path(
+                        value
+                    ):
+                        return None, f"valor de flag no permitido: {value}"
+                    resolved.append(value)
+                    i += 2
+                    continue
+                i += 1
+                continue
+            positionals.append((len(resolved), arg))
+            resolved.append(arg)
+            i += 1
+
+        if name == "echo":
+            # echo only prints text; it cannot read a file.
+            path_indexes: list[int] = []
+        elif name == "grep":
+            # First positional is the pattern; the rest are input files.
+            path_indexes = [
+                idx for n, (idx, _) in enumerate(positionals) if n > 0
+            ]
+        else:
+            path_indexes = [idx for idx, _ in positionals]
+
+        for idx in path_indexes:
+            arg = resolved[idx]
+            if arg == "-":  # stdin/stdout marker, not a path
+                continue
+            if arg.startswith("~") or "$" in arg or "`" in arg:
+                return None, f"path no permitido (expansión/tilde): {arg}"
             try:
-                self.validate_path(raw, write=False)
+                resolved[idx] = str(self.validate_path(arg, write=False))
             except PermissionError:
-                return f"path fuera de raíces permitidas: {arg}"
-        return None
+                return None, f"path fuera de raíces permitidas: {arg}"
+        return resolved, None
 
     def execute_command(self, command: str, timeout: int = 30) -> dict:
         """Run a whitelisted command with cwd=workspace, path-jailed args, no shell."""
@@ -501,28 +849,13 @@ class Toolbox:
             }
 
         # Only allow a short flag set per command (defense in depth)
-        path_err = self._validate_command_args(cmd_args)
+        resolved_args, path_err = self._prepare_command_args(cmd_args)
         if path_err:
             return {
                 "ok": False,
                 "error": "path_no_permitido",
                 "message": path_err,
             }
-
-        # Resolve path-like args to absolute workspace paths for the child
-        resolved_args = [cmd_args[0]]
-        for arg in cmd_args[1:]:
-            if _looks_like_path_arg(arg):
-                try:
-                    resolved_args.append(str(self.validate_path(arg, write=False)))
-                except PermissionError:
-                    return {
-                        "ok": False,
-                        "error": "path_no_permitido",
-                        "message": f"path fuera de raíces permitidas: {arg}",
-                    }
-            else:
-                resolved_args.append(arg)
 
         try:
             result = subprocess.run(
@@ -538,6 +871,7 @@ class Toolbox:
                     "LANG": os.environ.get("LANG", "C.UTF-8"),
                     "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
                 },
+                preexec_fn=_process_resource_preexec(),
             )
             ok = result.returncode == 0
             payload = {
@@ -569,7 +903,7 @@ class Toolbox:
             }
 
     def python_exec(self, code: str, timeout: int = 30) -> dict:
-        """Execute restricted Python (AST allowlist + isolated subprocess)."""
+        """Execute non-isolated Python (opt-in unsafe, AST pre-filter only)."""
         if not power_tools_enabled():
             return {
                 "ok": False,
@@ -577,6 +911,16 @@ class Toolbox:
                 "message": (
                     "python_exec requiere BONSAI_POWER_TOOLS=1 "
                     "(o BONSAI_DEBUG=1 en desarrollo)."
+                ),
+            }
+        if not unsafe_python_exec_enabled():
+            return {
+                "ok": False,
+                "error": "python_exec_unsafe_disabled",
+                "message": (
+                    "python_exec ejecuta Python sin aislamiento de sistema "
+                    "operativo y su filtro AST puede evadirse. Requiere "
+                    "BONSAI_UNSAFE_PYTHON_EXEC=1 además de BONSAI_POWER_TOOLS=1."
                 ),
             }
         if not isinstance(code, str) or not code.strip():
@@ -649,6 +993,7 @@ class Toolbox:
                         "PYTHONNOUSERSITE": "1",
                         "LANG": os.environ.get("LANG", "C.UTF-8"),
                     },
+                    preexec_fn=_process_resource_preexec(),
                 )
                 out = (result.stdout or "")[:8000]
                 err = (result.stderr or "")[:2000]
@@ -965,45 +1310,36 @@ class Toolbox:
                 "error": "url_invalida",
                 "message": "Solo URLs http/https permitidas",
             }
-        blocked = _ssrf_block_reason(url)
-        if blocked:
+        try:
+            result = _fetch_with_redirects(url, timeout)
+            status = result["status"]
+            if status >= 400:
+                return {
+                    "ok": False,
+                    "error": "http_error",
+                    "message": f"HTTP {status}: {result['reason']}",
+                }
+            content = result["body"].decode("utf-8", errors="replace")
+            return {
+                "ok": True,
+                "url": result["url"],
+                "status": status,
+                "content_type": result["headers"].get("content-type", ""),
+                "size": len(content),
+                "truncated": bool(result.get("truncated")),
+                "preview": content[:500],
+                "content": content[:10000],
+            }
+        except _SSRFError as e:
             return {
                 "ok": False,
                 "error": "url_bloqueada",
-                "message": blocked,
+                "message": str(e),
             }
-        try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "BonsaiPortable/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                # Re-check final URL after redirects
-                final = resp.geturl()
-                reblock = _ssrf_block_reason(final)
-                if reblock:
-                    return {
-                        "ok": False,
-                        "error": "url_bloqueada",
-                        "message": f"Redirect bloqueado: {reblock}",
-                    }
-                content = resp.read().decode("utf-8", errors="replace")
-                return {
-                    "ok": True,
-                    "url": final,
-                    "status": resp.status,
-                    "content_type": resp.headers.get("Content-Type", ""),
-                    "size": len(content),
-                    "preview": content[:500],
-                    "content": content[:10000],
-                }
-        except urllib.error.HTTPError as e:
-            return {
-                "ok": False,
-                "error": "http_error",
-                "message": f"HTTP {e.code}: {e.reason}",
-            }
-        except urllib.error.URLError as e:
-            return {"ok": False, "error": "url_error", "message": str(e.reason)}
+        except TimeoutError as e:
+            return {"ok": False, "error": "timeout", "message": str(e)}
+        except (OSError, http.client.HTTPException) as e:
+            return {"ok": False, "error": "url_error", "message": str(e)}
         except Exception as e:
             return {"ok": False, "error": "error_red", "message": str(e)}
 
@@ -1227,6 +1563,12 @@ def execute_tool_calls(
     permissions=None,
 ) -> list[dict]:
     """Execute tool calls against ALLOWED_TOOLS + registered MCP tools."""
+    if permissions is None:
+        # No caller-supplied policy still means deny-by-default for external tools.
+        from permissions import PermissionPolicy
+
+        permissions = PermissionPolicy.from_config({})
+
     results: list[dict] = []
     for call in calls:
         tool_name = call.get("tool", "")
@@ -1234,7 +1576,7 @@ def execute_tool_calls(
         if not isinstance(args, dict):
             args = {}
 
-        if permissions is not None and not permissions.allowed(tool_name):
+        if not permissions.allowed(tool_name):
             results.append(
                 {
                     "tool": tool_name,

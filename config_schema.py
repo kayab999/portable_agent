@@ -114,5 +114,14 @@ def validate_config(config: dict) -> dict:
             continue
         if not server.get("command"):
             errors.append(f"mcp_servers[{index}].command is required")
+        if "tools_allow" in server:
+            tools_allow = server.get("tools_allow")
+            if not isinstance(tools_allow, list) or not all(
+                isinstance(tool, str) and tool.strip() for tool in tools_allow
+            ):
+                errors.append(
+                    f"mcp_servers[{index}].tools_allow must be a list of "
+                    "non-empty strings"
+                )
 
     return {"errors": errors, "warnings": warnings}

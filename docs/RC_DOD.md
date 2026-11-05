@@ -38,7 +38,7 @@ Unchecked items are explicitly out of scope for this release.
   HTTP gateway (`pyproject.toml`, optional `lint-imports`)
 - [x] Shared composition root and model transport are covered, including
   fail-closed plugin/MCP wiring (`tests/test_runtime.py`)
-- [x] CI matrix: Linux Python 3.11–3.13, Windows PowerShell launcher job and an
+- [x] CI matrix: Linux Python 3.11.4–3.13, Windows PowerShell launcher job and an
   import-contract/audit job (`.github/workflows/ci.yml`)
 - [x] E2E: debug boot → health → `/v1` → clean shutdown
 - [x] E2E: production boot without vault stays locked; `/v1` is 401
@@ -77,8 +77,9 @@ Unchecked items are explicitly out of scope for this release.
   (`tests/test_skills.py`)
 - [x] Fixed system-prompt order with untrusted-content delimiters, including
   RAG context (`tests/test_context_builder.py`)
-- [x] MCP stdio handshake, namespaced tools, allowlists and fail-closed dispatch
-  (`tests/test_mcp_client.py`)
+- [x] MCP stdio `2026-07-28` protocol (`server/discover`, per-request `_meta`,
+  `resultType`), legacy `initialize` fallback, namespaced tools, strict
+  allowlists and fail-closed dispatch (`tests/test_mcp_client.py`)
 - [x] MCP results are labeled untrusted and size-capped
   (`tests/test_mcp_client.py`)
 - [x] Lifecycle hooks run without a shell, with a sanitized environment, and
@@ -97,19 +98,19 @@ Unchecked items are explicitly out of scope for this release.
 
 - [x] Fail-closed auth: no vault → unlock returns 403, no token
   (`tests/test_auth_fail_closed.py`)
-- [x] `--set-password` creates a single `owner.lock` (KDF+salt+canary) with
-  mode 0600 and atomic rotation (`tests/test_auth_fail_closed.py`)
+- [x] Download supply chain: pinned model SHA-256 and binary release digest
+  (`tests/test_setup_download.py`, `tests/test_runtime_core.py`)
 - [x] PBKDF2-HMAC-SHA256 at 600k iterations; rc.3 100k vaults verify and migrate
   (`tests/test_auth_fail_closed.py`)
 - [x] IPv6 (`::1`) is rejected at startup instead of failing at bind
   (`tests/test_runtime_core.py`, `tests/test_origin_host.py`)
-- [x] Wrong password rejected; unlock rate-limited to 5/min
+- [x] Wrong password rejected; unlock rate-limited to 5/min per client
   (`tests/test_auth_fail_closed.py`)
 - [x] `BONSAI_INSECURE=1` is the only auth bypass and is explicit
   (`tests/test_auth_fail_closed.py`)
-- [x] A verified unlock can mint new tokens; wrong passwords are rejected before
-  unlock (`tests/test_auth_fail_closed.py`)
-- [x] `--cli` prompts for the vault password when production is locked
+- [x] Token minting requires a valid bearer or vault password; process unlock
+  state alone cannot mint tokens (`tests/test_auth_fail_closed.py`)
+- [x] Gateway/model HTTP proxy disables redirects and implicit proxies
 - [x] RAG/persistence default off in every entrypoint, including
   `execution_loop` (`tests/test_feature_containment.py`)
 - [x] No `Access-Control-Allow-Origin: *`; exact loopback origin only
@@ -122,10 +123,11 @@ Unchecked items are explicitly out of scope for this release.
   (`tests/test_sqlite_concurrency.py`)
 - [x] `DEBUG` off by default (`BONSAI_DEBUG=1` for dev)
 - [x] Workspace write; docs/datasets read-only
-- [x] Subprocess whitelist without interpreters; path-jailed args
-- [x] `python_exec` AST allowlist (no `os`/`open`/`subprocess`)
+- [x] Resource limits for `execute_command` and `python_exec` where supported
+- [x] `python_exec` disabled by default; opt-in via `BONSAI_UNSAFE_PYTHON_EXEC=1`
+  (AST pre-filter, no OS isolation)
 - [x] POWER_TOOLS require `BONSAI_POWER_TOOLS=1` or DEBUG
-- [x] SSRF guards (private/link-local + redirect recheck)
+- [x] SSRF guards (non-global/CGNAT, pinned DNS, redirect recheck, 1 MiB body cap)
 - [x] Crypto Encrypt-then-MAC v1; legacy v0 rejected by default
 - [x] Persona tool allowlists enforced (no silent write/power elevation)
 - [x] `POST /api/tools` disabled outside DEBUG

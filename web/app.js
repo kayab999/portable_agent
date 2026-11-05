@@ -1,5 +1,16 @@
 // ── SESSION TOKEN (Bearer) ───────────────────────────────────────────────────
 let sessionToken = sessionStorage.getItem('bonsai_token') || '';
+// Launcher→browser hardware-unlock handoff: a short-lived token in the URL
+// fragment (never sent to the server or logged). Exchange it for a normal
+// session token, then strip it from the address bar.
+let bootstrapToken = '';
+(function consumeBootstrapToken() {
+  const match = /(?:^#|&)token=([A-Za-z0-9_-]+)/.exec(location.hash || '');
+  if (match) {
+    bootstrapToken = match[1];
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+})();
 
 function authHeaders(extra = {}) {
   const h = { ...extra };
@@ -63,17 +74,25 @@ async function ensureSession() {
   if (sessionToken) return sessionToken;
   if (sessionUnlockPromise) return sessionUnlockPromise;
   sessionUnlockPromise = (async () => {
-    const post = (body) => fetch(`${API_BASE}/api/session/unlock`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
-    });
+    const post = (body, token = bootstrapToken) => {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+        headers['X-Bonsai-Token'] = token;
+      }
+      return fetch(`${API_BASE}/api/session/unlock`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8000),
+      });
+    };
     try {
       let r = await post({});
       let d = await r.json().catch(() => ({}));
       if (r.ok && d.token) {
         sessionToken = d.token;
+        bootstrapToken = '';
         sessionStorage.setItem('bonsai_token', sessionToken);
         return sessionToken;
       }
@@ -82,6 +101,7 @@ async function ensureSession() {
         return '';
       }
       if (r.status === 403) {
+        bootstrapToken = '';
         // Avoid an immediate second prompt when a retry follows a cancel.
         if (Date.now() - unlockCancelledAt < 3000) return '';
         const pw = await askPassword();
@@ -89,7 +109,7 @@ async function ensureSession() {
           unlockCancelledAt = Date.now();
           return '';
         }
-        r = await post({ password: pw });
+        r = await post({ password: pw }, '');
         d = await r.json().catch(() => ({}));
         if (r.ok && d.token) {
           sessionToken = d.token;

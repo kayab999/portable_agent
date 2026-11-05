@@ -25,7 +25,12 @@ class TestToolsSandbox(unittest.TestCase):
         self.ws.mkdir()
         self.tb = Toolbox(workspace=self.ws)
         self._env = mock.patch.dict(
-            os.environ, {"BONSAI_POWER_TOOLS": "1", "BONSAI_DEBUG": "0"}
+            os.environ,
+            {
+                "BONSAI_POWER_TOOLS": "1",
+                "BONSAI_UNSAFE_PYTHON_EXEC": "1",
+                "BONSAI_DEBUG": "0",
+            },
         )
         self._env.start()
 

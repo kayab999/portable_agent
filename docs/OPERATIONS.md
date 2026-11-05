@@ -10,7 +10,10 @@ recovery for a local Linux installation. Windows/macOS are best-effort.
 - `llama-server` (bundled by `--setup`, or on `PATH`)
 - A local `.gguf` model in `models/`
 
-No runtime Python packages are required.
+`--setup` descarga el binario y los modelos y verifica SHA-256: los modelos se
+comparan contra el hash fijado en `MODEL_CATALOG`, y el binario contra el
+`digest` publicado por GitHub o `BONSAI_BIN_SHA256`. Un hash que no coincida
+borra el archivo parcial y falla.
 
 ## Install and first run
 

@@ -77,8 +77,11 @@ Skills: `skills/`, `.agents/skills/`, `.claude/skills/`, `.opencode/skills/`,
 Los scripts de skill no se ejecutan.
 
 MCP: solo stdio; tools como `mcp__server__tool`; servidores declarados en
-`config.json` con `enabled: true` y `tools_allow` opcional. Entorno saneado,
-sin shell, timeout y tope de salida.
+`config.json` con `enabled: true` y `tools_allow` opcional. El cliente habla
+MCP `2026-07-28` (`server/discover` y `_meta` por petición) y cae al handshake
+legacy `initialize` solo con servidores que no implementan la revisión moderna.
+Un `tools_allow: []` explícito no expone ninguna tool; omitirlo expone el
+catálogo anunciado. Entorno saneado, sin shell, timeout y tope de salida.
 
 ## RAG y persistencia
 
@@ -137,18 +140,18 @@ persistencia está activa y devuelve `citations` cuando RAG está activo.
 
 ## Seguridad
 - **Auth fail-closed**: sin vault, `POST /api/session/unlock` no emite token.
-- **Sesión**: un desbloqueo verificado permite emitir tokens a la UI/CLI hasta reiniciar.
+- **Sesión**: emitir token requiere bearer válido o contraseña verificada; el estado “unlocked” por sí solo no autoriza. YubiKey entrega un token corto solo al cliente que arranca el launcher.
 - **Vault**: PBKDF2-SHA256 600k + canary Encrypt-then-MAC; un solo `owner.lock` 0600 con rotación atómica. Vaults rc.3 se migran al verificar.
 - **IPv6**: rechazada al arrancar; el servidor stdlib es IPv4-only.
-- **Tokens**: bearer en RAM, TTL 24 h, revocables al reiniciar.
+- **Proxy LLM**: sin redirects ni proxies implícitos; timeout por petición.
 - **CORS**: solo el origen exacto del gateway; nunca `*`.
 - **Host**: validado contra la dirección de bind (anti DNS-rebinding).
-- **Rate limits**: 90 req/min general, 30/min chat, 5/min unlock.
+- **Rate limits**: 90 req/min general, 30/min chat, 5/min unlock per client.
 - **Escritura**: solo `workspace/`.
 - **Lectura**: `workspace/` + `docs/` + `data/KAYAB_DATASETS` si existe.
-- **Subprocess**: cwd=workspace, whitelist sin intérpretes, sin shell.
-- **`python_exec`**: AST allowlist + `python -I`; power-gated.
-- **SSRF**: bloqueo loopback/privado/link-local + recheck post-redirect.
+- **Subprocess**: cwd=workspace, whitelist sin intérpretes, flags allowlisted, sin shell; cada path (incluidos nombres relativos y symlinks) se resuelve bajo las raíces de lectura; límites de recursos best-effort.
+- **`python_exec`**: opt-in unsafe; pre-filtro AST + `python -I`, sin aislamiento OS; límites de recursos best-effort.
+- **SSRF**: bloqueo loopback/privado/link-local/CGNAT y otras IPs no globales + recheck post-redirect; cuerpo de respuesta limitado a 1 MiB.
 - **Parser**: solo `<tool_call>`; fences/JSON suelto requieren
   `BONSAI_LEGACY_TOOL_PARSING=1`.
 - **Hooks/permisos**: sin shell, entorno saneado, timeout; pre-eventos fallan
@@ -168,8 +171,9 @@ persistencia está activa y devuelve `citations` cuando RAG está activo.
 |-----|--------|
 | `BONSAI_DEBUG=1` | Auth off, direct tools on, power tools on (desarrollo) |
 | `BONSAI_INSECURE=1` | Bypass explícito: emite token sin contraseña; anuncia warning |
-| `BONSAI_POWER_TOOLS=1` | Habilita python_exec / execute_command / fetch_url |
-| `BONSAI_ALLOW_LAN=1` | Permite host no-loopback en config (Host sigue rechazando clientes) |
+| `BONSAI_POWER_TOOLS=1` | Habilita execute_command / fetch_url / python_exec (gate inicial) |
+| `BONSAI_UNSAFE_PYTHON_EXEC=1` | Opt-in adicional para python_exec sin aislamiento OS |
+| `BONSAI_BIN_SHA256` | SHA-256 explícito para `llama-server` (`--setup`; falla cerrada) |
 | `BONSAI_HTTP_LOG=1` | Access log del gateway |
 | `BONSAI_LOG_JSON=1` | Logs estructurados en `runtime/bonsai.log` |
 | `BONSAI_CONFIG=<path>` | Override de `config.json` |

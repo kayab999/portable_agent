@@ -227,6 +227,120 @@ class TestServerBinaryDownload(unittest.TestCase):
         ]
         self.assertIsNone(runtime_core.pick_release_asset(repos, "linux", "x86_64"))
 
+    def test_download_requires_and_verifies_asset_digest(self):
+        import hashlib
+
+        payload = b"fake-llama-binary-archive"
+        expected = hashlib.sha256(payload).hexdigest()
+        release = [
+            {
+                "assets": [
+                    {
+                        "name": "llama-prism-x-bin-ubuntu-x64.tar.gz",
+                        "browser_download_url": "https://example.com/asset",
+                        "digest": f"sha256:{expected}",
+                    }
+                ]
+            }
+        ]
+
+        def fake_download(url, dest, progress_cb=None):
+            dest.write_bytes(payload)
+
+        with (
+            patch("runtime_core._http_get", return_value=__import__("json").dumps(release).encode()),
+            patch("runtime_core._download_stream", side_effect=fake_download),
+            patch("runtime_core._extract_archive") as extract,
+            tempfile.TemporaryDirectory() as td,
+        ):
+            dest = runtime_core.download_server_binary(
+                Path(td) / "bin", "linux", "x86_64"
+            )
+            self.assertEqual(dest, Path(td) / "bin" / "linux" / "x86_64" / "llama-server")
+            extract.assert_called_once()
+
+    def test_download_rejects_bad_asset_digest(self):
+        payload = b"fake-llama-binary-archive"
+        release = [
+            {
+                "assets": [
+                    {
+                        "name": "llama-prism-x-bin-ubuntu-x64.tar.gz",
+                        "browser_download_url": "https://example.com/asset",
+                        "digest": "sha256:" + "0" * 64,
+                    }
+                ]
+            }
+        ]
+
+        def fake_download(url, dest, progress_cb=None):
+            dest.write_bytes(payload)
+
+        with (
+            patch("runtime_core._http_get", return_value=__import__("json").dumps(release).encode()),
+            patch("runtime_core._download_stream", side_effect=fake_download),
+            patch("runtime_core._extract_archive") as extract,
+            tempfile.TemporaryDirectory() as td,
+        ):
+            with self.assertRaises(RuntimeError):
+                runtime_core.download_server_binary(Path(td) / "bin", "linux", "x86_64")
+            extract.assert_not_called()
+
+    def test_download_fails_without_digest_or_env(self):
+        release = [
+            {
+                "assets": [
+                    {
+                        "name": "llama-prism-x-bin-ubuntu-x64.tar.gz",
+                        "browser_download_url": "https://example.com/asset",
+                    }
+                ]
+            }
+        ]
+
+        def fake_download(url, dest, progress_cb=None):
+            dest.write_bytes(b"payload")
+
+        with (
+            patch("runtime_core._http_get", return_value=__import__("json").dumps(release).encode()),
+            patch("runtime_core._download_stream", side_effect=fake_download),
+            patch("runtime_core._extract_archive") as extract,
+            tempfile.TemporaryDirectory() as td,
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            with self.assertRaises(RuntimeError):
+                runtime_core.download_server_binary(Path(td) / "bin", "linux", "x86_64")
+            extract.assert_not_called()
+
+
+class TestFileSha256(unittest.TestCase):
+    def test_file_sha256_streaming(self):
+        import tempfile
+        from pathlib import Path
+
+        payload = b"abc" * 100000
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "payload.bin"
+            path.write_bytes(payload)
+            self.assertEqual(
+                runtime_core.file_sha256(path), __import__("hashlib").sha256(payload).hexdigest()
+            )
+
+    def test_verify_file_sha256_ok_and_bad(self):
+        import tempfile
+        from pathlib import Path
+
+        payload = b"payload-bytes"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "payload.bin"
+            path.write_bytes(payload)
+            expected = __import__("hashlib").sha256(payload).hexdigest()
+            self.assertEqual(runtime_core.verify_file_sha256(path, expected), expected)
+            with self.assertRaises(RuntimeError):
+                runtime_core.verify_file_sha256(path, "0" * 64)
+            with self.assertRaises(RuntimeError):
+                runtime_core.verify_file_sha256(path, "not-a-hash")
+
 
 class TestExtractArchive(unittest.TestCase):
     def _make_targz(self, td: Path) -> Path:
@@ -248,6 +362,8 @@ class TestExtractArchive(unittest.TestCase):
             runtime_core._extract_archive(arc, "llama-server", out)
             self.assertEqual((out / "llama-server").read_bytes(), b"\x7fELF-fake")
             self.assertTrue((out / "libllama-server-impl.so").exists())
+            if __import__("os").name != "nt":
+                self.assertTrue((out / "llama-server").stat().st_mode & 0o111)
 
     def test_missing_exe_raises(self):
         with tempfile.TemporaryDirectory() as td:

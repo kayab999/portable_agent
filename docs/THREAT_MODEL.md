@@ -41,8 +41,8 @@ all treated as **untrusted inputs**, even when they are local.
 | T3 | Stolen device | PBKDF2 vault, `0600` secret files, tokens in memory only, no plaintext password storage | `tests/test_crypto.py`, `tests/test_auth_fail_closed.py`, `tests/test_doctor.py` |
 | T4 | Malicious project content (`AGENTS.md`, skills, agents) | Untrusted delimiters, no permission widening, parser caps | `tests/test_agents_md.py`, `tests/test_skills.py`, `tests/test_context_builder.py` |
 | T5 | Malicious model output | Strict tool-call parser, persona ∩ global allowlist, power gate, permission policy, hooks | `tests/test_tool_parser_strict.py`, `tests/test_persona_tools.py`, `tests/test_hooks.py` |
-| T6 | Sandbox escape via tools | Path confinement, command whitelist, AST-only `python_exec`, SSRF checks, no shell | `tests/test_tools_sandbox.py`, `tests/test_sandbox_escape.py`, `tests/test_ssrf.py`, `audit_suite/red_team/test_tools_security.py` |
-| T7 | Malicious MCP server | Opt-in stdio, JSON-RPC framing caps, tool namespacing, no permission expansion, `post_tool` hooks | `tests/test_mcp_client.py` |
+| T6 | Sandbox escape via tools | Path confinement, command/flag whitelist with symlink-resolved path args, opt-in non-isolated `python_exec` (AST pre-filter only, separate unsafe gate), per-hop SSRF validation with pinned-IP connections, no shell | `tests/test_tools_sandbox.py`, `tests/test_sandbox_escape.py`, `tests/test_ssrf.py`, `audit_suite/red_team/test_tools_security.py` |
+| T7 | Malicious MCP server | Opt-in stdio, modern/legacy negotiation, per-request `_meta`, `resultType` enforcement, JSON-RPC framing caps, tool namespacing, strict empty allowlist, no permission expansion, `post_tool` hooks | `tests/test_mcp_client.py` |
 | T8 | Malicious plugin | Declarative manifests only, no code execution, explicit enable flags | `tests/test_plugins_subagents.py` |
 | T9 | Subagent privilege escalation | Agent tools ∩ global allowlist ∩ power gate ∩ active persona allowlist | `tests/test_plugins_subagents.py` |
 | T10 | Prompt injection via RAG documents | Results wrapped as untrusted, fenced delimiters, citations, no tool authorization | `tests/test_context_builder.py`, `tests/test_rag_store.py` |
@@ -58,8 +58,9 @@ all treated as **untrusted inputs**, even when they are local.
 - Remote MCP transports (HTTP/SSE/OAuth).
 - Executing plugin JS/TS/Python.
 - Multi-tenant authorization.
-- OS-level confinement. `python_exec` is an AST allowlist, not a real sandbox;
-  a local attacker who can modify the runtime can bypass it.
+- OS-level confinement. `python_exec` is disabled by default and remains an
+  opt-in, non-isolated runner; its AST pre-filter is not a real sandbox and a
+  local attacker who can modify the runtime can bypass it.
 
 ## Residual risks
 

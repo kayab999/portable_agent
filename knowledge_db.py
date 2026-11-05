@@ -13,8 +13,14 @@ Tables:
 Stores in ./data/knowledge.db
 """
 
+import os
 import sqlite3
 from pathlib import Path
+
+if os.environ.get("BONSAI_LEGACY_PATHS") != "1" and __name__ != "__main__":
+    raise RuntimeError(
+        "Legacy module disabled by default. Set BONSAI_LEGACY_PATHS=1 to load it."
+    )
 
 # ─── PATHS ────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).parent.resolve()

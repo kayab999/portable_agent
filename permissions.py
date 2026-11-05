@@ -21,26 +21,46 @@ class PermissionPolicy:
 
     @classmethod
     def from_config(cls, config: dict | None) -> "PermissionPolicy":
-        config = config if isinstance(config, dict) else {}
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("tool_permissions debe ser un objeto")
+        config = config or {}
         raw_rules = config.get("rules") or config.get("tools") or {}
-        rules = {
-            str(name): str(decision).lower()
-            for name, decision in (raw_rules or {}).items()
-            if str(decision).lower() in VALID_DECISIONS
-        }
+        if not isinstance(raw_rules, dict):
+            raise ValueError("tool_permissions.rules debe ser un objeto")
+        rules: dict[str, str] = {}
+        for name, decision in raw_rules.items():
+            normalized = str(decision).lower()
+            if normalized not in VALID_DECISIONS:
+                raise ValueError(
+                    f"Decisión inválida para {name!r}: {decision!r}; "
+                    "use allow, ask o deny"
+                )
+            rules[str(name)] = normalized
         default = str(config.get("default", "allow")).lower()
         if default not in VALID_DECISIONS:
-            default = "allow"
+            raise ValueError(
+                f"Default inválido: {default!r}; use allow, ask o deny"
+            )
         raw_auto = config.get("auto_approve") or []
+        if not isinstance(raw_auto, (list, tuple)):
+            raise ValueError("auto_approve debe ser una lista")
         auto = frozenset(str(name) for name in raw_auto if isinstance(name, str))
         return cls(rules=rules, default=default, auto_approve=auto)
+
+    @classmethod
+    def deny_all(cls) -> "PermissionPolicy":
+        """Fail-closed policy used when owner configuration cannot be loaded."""
+        return cls(default="deny")
 
     def decision(self, tool_name: str) -> str:
         if tool_name in self.rules:
             return self.rules[tool_name]
         # Namespaced MCP tools inherit a rule for ``mcp__*`` when present.
-        if tool_name.startswith("mcp__") and "mcp__*" in self.rules:
-            return self.rules["mcp__*"]
+        if tool_name.startswith("mcp__"):
+            if "mcp__*" in self.rules:
+                return self.rules["mcp__*"]
+            # External tools are denied unless explicitly authorized.
+            return "deny"
         return self.default
 
     def allowed(self, tool_name: str) -> bool:

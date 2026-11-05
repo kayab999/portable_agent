@@ -3,6 +3,13 @@
 
 from __future__ import annotations
 
+import os
+
+if os.environ.get("BONSAI_LEGACY_PATHS") != "1":
+    raise RuntimeError(
+        "Legacy module disabled by default. Set BONSAI_LEGACY_PATHS=1 to load it."
+    )
+
 from agent_loop import agent_step
 from agentportable import BonsaiOrchestrator
 from tools import get_toolbox

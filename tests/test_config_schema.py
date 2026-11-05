@@ -30,6 +30,19 @@ class TestConfigSchema(unittest.TestCase):
         report = validate_config({"mcp_servers": [{"name": "x"}]})
         self.assertTrue(report["errors"])
 
+    def test_mcp_tools_allow_must_be_string_list(self):
+        server = {"command": "x"}
+        valid = validate_config(
+            {"mcp_servers": [{**server, "tools_allow": []}]}
+        )
+        self.assertEqual(valid["errors"], [])
+        for value in (None, "echo", [""], [42]):
+            with self.subTest(value=value):
+                report = validate_config(
+                    {"mcp_servers": [{**server, "tools_allow": value}]}
+                )
+                self.assertTrue(report["errors"])
+
     def test_non_loopback_warns(self):
         report = validate_config({"host": "0.0.0.0"})
         self.assertTrue(report["warnings"])

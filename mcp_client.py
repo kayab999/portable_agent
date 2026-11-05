@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """mcp_client.py — Minimal, dependency-free MCP stdio client.
 
-Scope for rc.5:
+Scope:
   - JSON-RPC 2.0 over newline-delimited stdio
-  - initialize / tools/list / tools/call (tools only)
+  - modern MCP (2026-07-28): ``server/discover`` plus per-request ``_meta``
+  - legacy fallback: ``initialize`` handshake for older stdio servers
+  - tools/list / tools/call (tools only)
   - per-server allowlist and namespacing (``mcp__server__tool``)
   - strict timeouts, output caps, sanitized environment, no shell
 
@@ -25,10 +27,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSION = "2025-11-25"
+CLIENT_INFO = {"name": "bonsai-portable", "version": "1.0.0rc5"}
 DEFAULT_TIMEOUT = 20.0
+DISCOVER_PROBE_TIMEOUT = 5.0
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_RESULT_CHARS = 64 * 1024
+MAX_TOOL_PAGES = 100
 _NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+# Modern JSON-RPC errors that identify a server as modern. Legacy servers use
+# implementation-defined errors for unknown methods, commonly -32601/-32602;
+# those must still trigger the legacy fallback.
+_MODERN_ERROR_CODES = frozenset({-32020, -32021, -32022})
+_UNSUPPORTED_VERSION = -32022
 
 # Only these environment variables are forwarded to stdio servers. Paths that
 # could leak Bonsai's vault or configuration are deliberately excluded.
@@ -55,6 +67,26 @@ class MCPTimeout(MCPError):
     """Raised when a server does not answer before the deadline."""
 
 
+class MCPResponseError(MCPError):
+    """JSON-RPC error returned by the server."""
+
+    def __init__(
+        self,
+        server: str,
+        method: str,
+        code: int | None,
+        message: str,
+        data: object = None,
+    ):
+        super().__init__(f"MCP {server}:{method} error: {message}")
+        self.code = code
+        self.data = data
+
+
+class MCPProtocolError(MCPError):
+    """Modern protocol failure that must never trigger a legacy fallback."""
+
+
 @dataclass(frozen=True)
 class MCPTool:
     server: str
@@ -68,6 +100,50 @@ class MCPTool:
         if len(description) > 240:
             description = description[:237] + "..."
         return f"- {self.namespaced}: {description}"
+
+
+def _supported_versions(data: object) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("supported")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str)]
+
+
+def _validate_result(server: str, method: str, result: dict) -> dict:
+    """Enforce the modern ``resultType`` contract and fail closed."""
+    result_type = result.get("resultType")
+    if result_type is None or result_type == "complete":
+        return result
+    if result_type == "input_required":
+        raise MCPProtocolError(
+            f"MCP {server}:{method} requires client input, "
+            "which Bonsai does not support"
+        )
+    raise MCPProtocolError(
+        f"MCP {server}:{method} returned unknown resultType {result_type!r}"
+    )
+
+
+def _normalize_tool_allowlist(tools_allow: object) -> tuple[str, ...] | None:
+    """Return ``None`` when unset, or a strict allowlist (possibly empty).
+
+    An explicit empty list means "no tools". It must never be confused with an
+    omitted allowlist, which leaves the server's advertised catalog available.
+    """
+    if tools_allow is None:
+        return None
+    if not isinstance(tools_allow, (list, tuple)):
+        raise MCPError("tools_allow must be a list of tool names")
+    normalized: list[str] = []
+    for item in tools_allow:
+        if not isinstance(item, str) or not item.strip():
+            raise MCPError("tools_allow entries must be non-empty strings")
+        name = item.strip()
+        if name not in normalized:
+            normalized.append(name)
+    return tuple(normalized)
 
 
 class MCPServer:
@@ -93,7 +169,7 @@ class MCPServer:
         self.args = [str(arg) for arg in (args or [])]
         self.extra_env = {str(k): str(v) for k, v in (env or {}).items()}
         self.cwd = str(cwd) if cwd else None
-        self.tools_allow = tuple(tools_allow or ())
+        self.tools_allow = _normalize_tool_allowlist(tools_allow)
         self.timeout = float(timeout)
         self.proc: subprocess.Popen | None = None
         self._queue: queue.Queue = queue.Queue()
@@ -102,6 +178,11 @@ class MCPServer:
         self._next_id = 0
         self._closed = False
         self.tools: list[MCPTool] = []
+        # "modern" (per-request metadata) or "legacy" (initialize handshake).
+        self.era: str | None = None
+        self.protocol_version: str | None = None
+        self.server_info: dict = {}
+        self.capabilities: dict = {}
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -112,6 +193,9 @@ class MCPServer:
 
     def start(self) -> None:
         if self.proc is not None:
+            return
+        if self.tools_allow == ():
+            # Explicit empty allowlist: never spawn a server with no purpose.
             return
         try:
             self.proc = subprocess.Popen(
@@ -130,7 +214,7 @@ class MCPServer:
             target=self._read_loop, name=f"mcp-{self.name}", daemon=True
         )
         self._reader.start()
-        self._initialize()
+        self._handshake()
 
     def _read_loop(self) -> None:
         proc = self.proc
@@ -166,19 +250,32 @@ class MCPServer:
         except OSError as exc:
             raise MCPError(f"MCP write failed: {exc}") from exc
 
-    def _request(self, method: str, params: dict | None = None) -> dict:
+    def _request(
+        self,
+        method: str,
+        params: dict | None = None,
+        *,
+        modern: bool | None = None,
+        timeout: float | None = None,
+    ) -> dict:
         with self._lock:
             self._next_id += 1
             request_id = self._next_id
+            request_params = dict(params or {})
+            if modern is None:
+                modern = self.era == "modern"
+            if modern:
+                request_params["_meta"] = self._request_meta()
             self._send(
                 {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "method": method,
-                    "params": params or {},
+                    "params": request_params,
                 }
             )
-            deadline = time.monotonic() + self.timeout
+            budget = self.timeout if timeout is None else timeout
+            deadline = time.monotonic() + budget
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -193,34 +290,149 @@ class MCPServer:
                     continue
                 if "error" in message:
                     error = message["error"]
-                    raise MCPError(
-                        f"MCP {self.name}:{method} error: "
-                        f"{error.get('message') or error}"
+                    if not isinstance(error, dict):
+                        error = {}
+                    code = error.get("code")
+                    if not isinstance(code, int):
+                        code = None
+                    detail = error.get("message")
+                    raise MCPResponseError(
+                        self.name,
+                        method,
+                        code,
+                        str(detail or error),
+                        error.get("data"),
                     )
                 result = message.get("result")
-                return result if isinstance(result, dict) else {}
+                if not isinstance(result, dict):
+                    raise MCPError(
+                        f"MCP {self.name}:{method} returned a non-object result"
+                    )
+                return _validate_result(self.name, method, result)
+
+    def _request_meta(self, version: str | None = None) -> dict:
+        return {
+            "io.modelcontextprotocol/protocolVersion": (
+                version or self.protocol_version or PROTOCOL_VERSION
+            ),
+            "io.modelcontextprotocol/clientInfo": dict(CLIENT_INFO),
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
 
     def _notify(self, method: str, params: dict | None = None) -> None:
         self._send(
             {"jsonrpc": "2.0", "method": method, "params": params or {}}
         )
 
-    def _initialize(self) -> None:
-        self._request(
+    def _handshake(self) -> None:
+        """Detect a modern server, falling back to the legacy handshake."""
+        probe_timeout = min(self.timeout, DISCOVER_PROBE_TIMEOUT)
+        try:
+            discovered = self._discover(probe_timeout)
+        except MCPProtocolError:
+            # A recognized modern failure must never trigger a legacy retry.
+            raise
+        except MCPResponseError as exc:
+            if exc.code == _UNSUPPORTED_VERSION:
+                raise MCPProtocolError(
+                    self._unsupported_version_message(exc.data)
+                ) from exc
+            if exc.code in _MODERN_ERROR_CODES:
+                # A recognized modern error identifies a modern server; the
+                # spec explicitly forbids falling back to initialize here.
+                raise MCPProtocolError(str(exc)) from exc
+            self._legacy_handshake()
+            return
+        except (MCPTimeout, MCPError):
+            # Legacy servers often return an implementation-defined error for
+            # unknown pre-initialize methods; some do not answer at all.
+            self._legacy_handshake()
+            return
+        self._accept_discover(discovered)
+
+    def _discover(self, timeout: float) -> dict:
+        try:
+            return self._request(
+                "server/discover", {}, modern=True, timeout=timeout
+            )
+        except MCPResponseError as exc:
+            if exc.code != _UNSUPPORTED_VERSION:
+                raise
+            supported = _supported_versions(exc.data)
+            if PROTOCOL_VERSION not in supported:
+                raise MCPProtocolError(
+                    self._unsupported_version_message(exc.data)
+                ) from exc
+            # The server advertised our version in an Unsupported error (for
+            # example during a rolling upgrade). Retry once with it.
+            return self._request(
+                "server/discover", {}, modern=True, timeout=timeout
+            )
+
+    def _unsupported_version_message(self, data: object) -> str:
+        supported = _supported_versions(data)
+        detail = ", ".join(supported) if supported else "(none reported)"
+        return (
+            f"MCP server {self.name!r} does not support {PROTOCOL_VERSION}; "
+            f"supported versions: {detail}"
+        )
+
+    def _accept_discover(self, result: dict) -> None:
+        supported = result.get("supportedVersions")
+        if not isinstance(supported, list):
+            raise MCPProtocolError(
+                f"MCP server {self.name!r} returned an invalid DiscoverResult"
+            )
+        versions = [item for item in supported if isinstance(item, str)]
+        if PROTOCOL_VERSION not in versions:
+            raise MCPProtocolError(
+                f"MCP server {self.name!r} does not list {PROTOCOL_VERSION}; "
+                f"supported versions: {', '.join(versions) or '(none)'}"
+            )
+        self.era = "modern"
+        self.protocol_version = PROTOCOL_VERSION
+        capabilities = result.get("capabilities")
+        self.capabilities = capabilities if isinstance(capabilities, dict) else {}
+        meta = result.get("_meta")
+        info = (
+            meta.get("io.modelcontextprotocol/serverInfo")
+            if isinstance(meta, dict)
+            else None
+        )
+        self.server_info = info if isinstance(info, dict) else {}
+
+    def _legacy_handshake(self) -> None:
+        result = self._request(
             "initialize",
             {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": LEGACY_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "bonsai-portable", "version": "rc.5"},
+                "clientInfo": dict(CLIENT_INFO),
             },
+            modern=False,
         )
+        self.era = "legacy"
+        version = result.get("protocolVersion")
+        self.protocol_version = (
+            version if isinstance(version, str) else LEGACY_PROTOCOL_VERSION
+        )
+        capabilities = result.get("capabilities")
+        self.capabilities = capabilities if isinstance(capabilities, dict) else {}
+        info = result.get("serverInfo")
+        self.server_info = info if isinstance(info, dict) else {}
         self._notify("notifications/initialized")
 
     def list_tools(self) -> list[MCPTool]:
         tools: list[MCPTool] = []
         cursor = None
         seen_cursors: set[str] = set()
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > MAX_TOOL_PAGES:
+                raise MCPError(
+                    f"MCP {self.name}: tools/list exceeded {MAX_TOOL_PAGES} pages"
+                )
             params = {"cursor": cursor} if cursor else {}
             result = self._request("tools/list", params)
             for raw in result.get("tools") or []:
@@ -229,7 +441,7 @@ class MCPServer:
                 original = str(raw.get("name") or "").strip()
                 if not original:
                     continue
-                if self.tools_allow and original not in self.tools_allow:
+                if self.tools_allow is not None and original not in self.tools_allow:
                     continue
                 namespaced = (
                     f"mcp__{_NAME_RE.sub('_', self.name)}__"
@@ -253,6 +465,10 @@ class MCPServer:
         return tools
 
     def call_tool(self, name: str, arguments: dict) -> dict:
+        if self.tools_allow is not None and name not in self.tools_allow:
+            raise MCPError(f"MCP {self.name}: tool {name!r} is not allowlisted")
+        if not any(tool.name == name for tool in self.tools):
+            raise MCPError(f"MCP {self.name}: tool {name!r} was not advertised")
         result = self._request(
             "tools/call", {"name": name, "arguments": arguments or {}}
         )
@@ -366,6 +582,14 @@ class MCPManager:
             if not isinstance(raw, dict) or not raw.get("enabled", False):
                 continue
             try:
+                tools_allow = raw.get("tools_allow")
+                if "tools_allow" in raw and not isinstance(
+                    tools_allow, (list, tuple)
+                ):
+                    raise MCPError(
+                        "tools_allow must be a list of tool names "
+                        "(use [] to deny all tools)"
+                    )
                 servers.append(
                     MCPServer(
                         name=str(raw.get("name", "")),
@@ -373,7 +597,9 @@ class MCPManager:
                         args=raw.get("args") or [],
                         env=raw.get("env") or {},
                         cwd=raw.get("cwd"),
-                        tools_allow=raw.get("tools_allow") or [],
+                        # Missing key => None (all advertised tools). Explicit
+                        # [] => strict empty allowlist (no tools at all).
+                        tools_allow=tools_allow,
                         timeout=float(raw.get("timeout", DEFAULT_TIMEOUT)),
                     )
                 )
@@ -385,6 +611,10 @@ class MCPManager:
 
     def start_all(self) -> "MCPManager":
         for server in list(self.servers.values()):
+            if server.tools_allow == ():
+                # Explicit empty allowlist: do not spawn a process that can
+                # never expose a tool.
+                continue
             try:
                 server.start()
                 server.list_tools()

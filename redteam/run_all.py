@@ -3,8 +3,8 @@
 Red-team runner — executes real adversarial unit tests.
 
 Claims that require OS-level isolation (seccomp, skill signing) are NOT
-implemented in this stdlib runtime; this suite covers path jail, AST sandbox,
-command whitelist, and gateway auth only.
+implemented in this stdlib runtime; this suite covers path jail, the opt-in
+non-isolated python_exec pre-filter, command whitelist, and gateway auth only.
 """
 from __future__ import annotations
 

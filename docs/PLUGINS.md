@@ -43,13 +43,16 @@ startup.
 
 Plugin MCP declarations are merged only when `mcp_enabled` and
 `plugins_enable_mcp` are both true. Only stdio commands are supported. The
-runtime never accepts remote HTTP/SSE/OAuth MCP endpoints.
+runtime never accepts remote HTTP/SSE/OAuth MCP endpoints. If a plugin declares
+`tools_allow`, only those tools are exposed; an explicit empty list exposes
+none, while omitting the key exposes the server's advertised catalog.
 
 ## What plugins cannot do
 
 - Execute JS/TS/Python or install packages.
 - Add tools outside `ALLOWED_TOOLS`.
-- Enable power tools (`execute_command`, `python_exec`, `fetch_url`).
+- Enable power tools (`execute_command`, `fetch_url`, or `python_exec` with its
+  separate `BONSAI_UNSAFE_PYTHON_EXEC=1` opt-in).
 - Change hooks, permissions, sandbox roots or network policy.
 - Override built-in skills or agents silently (duplicates are reported).
 

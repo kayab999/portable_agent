@@ -174,22 +174,30 @@ def _normalize_mcp(plugin_name: str, raw) -> list[dict]:
         command = cfg.get("command")
         if not command:
             continue
-        servers.append(
-            {
-                "name": _sanitize(f"{plugin_name}__{name}")[:41],
-                "command": str(command),
-                "args": [str(arg) for arg in (cfg.get("args") or [])],
-                "env": {
-                    str(key): str(value)
-                    for key, value in (cfg.get("env") or {}).items()
-                },
-                # Plugin MCP servers are inert until the owner opts in.
-                "enabled": False,
-                "tools_allow": [
-                    str(tool) for tool in (cfg.get("tools_allow") or [])
-                ],
-            }
-        )
+        entry = {
+            "name": _sanitize(f"{plugin_name}__{name}")[:41],
+            "command": str(command),
+            "args": [str(arg) for arg in (cfg.get("args") or [])],
+            "env": {
+                str(key): str(value)
+                for key, value in (cfg.get("env") or {}).items()
+            },
+            # Plugin MCP servers are inert until the owner opts in.
+            "enabled": False,
+        }
+        # Preserve the distinction between an omitted allowlist (all
+        # advertised tools) and an explicit empty allowlist (no tools).
+        if "tools_allow" in cfg:
+            raw_tools = cfg.get("tools_allow")
+            if isinstance(raw_tools, list):
+                entry["tools_allow"] = [
+                    str(tool).strip()
+                    for tool in raw_tools
+                    if isinstance(tool, str) and tool.strip()
+                ]
+            else:
+                entry["tools_allow"] = []
+        servers.append(entry)
     return servers
 
 

@@ -46,6 +46,7 @@ def build_system_prompt(
     active_skills: Iterable[tuple[str, str]] = (),
     mcp_catalog: str = "",
     rag_context: str = "",
+    knowledge_context: str = "",
 ) -> str:
     """Return the full system prompt in the fixed precedence order."""
     parts = [base.strip()] if base.strip() else []
@@ -64,6 +65,8 @@ def build_system_prompt(
         external.append(_block("MCP_CATALOG", mcp_catalog))
     if rag_context.strip():
         external.append(_block("RAG_CONTEXT", rag_context))
+    if knowledge_context.strip():
+        external.append(_block("KNOWLEDGE_CONTEXT", knowledge_context))
     if external:
         # Keep the rule next to the untrusted content, not buried at the top.
         parts.append(f"Untrusted context rules:\n{_UNTRUSTED_RULE}")

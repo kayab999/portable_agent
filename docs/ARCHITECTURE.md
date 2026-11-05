@@ -150,7 +150,7 @@ persistencia está activa y devuelve `citations` cuando RAG está activo.
 - **Escritura**: solo `workspace/`.
 - **Lectura**: `workspace/` + `docs/` + `data/KAYAB_DATASETS` si existe.
 - **Subprocess**: cwd=workspace, whitelist sin intérpretes, flags allowlisted, sin shell; cada path (incluidos nombres relativos y symlinks) se resuelve bajo las raíces de lectura; límites de recursos best-effort.
-- **`python_exec`**: opt-in unsafe; pre-filtro AST + `python -I`, sin aislamiento OS; límites de recursos best-effort.
+- **`knowledge_lookup`**: read-only structured lookup, disabled by default, gated by config, permissions, persona allowlists, and hooks.
 - **SSRF**: bloqueo loopback/privado/link-local/CGNAT y otras IPs no globales + recheck post-redirect; cuerpo de respuesta limitado a 1 MiB.
 - **Parser**: solo `<tool_call>`; fences/JSON suelto requieren
   `BONSAI_LEGACY_TOOL_PARSING=1`.
@@ -173,6 +173,7 @@ persistencia está activa y devuelve `citations` cuando RAG está activo.
 | `BONSAI_INSECURE=1` | Bypass explícito: emite token sin contraseña; anuncia warning |
 | `BONSAI_POWER_TOOLS=1` | Habilita execute_command / fetch_url / python_exec (gate inicial) |
 | `BONSAI_UNSAFE_PYTHON_EXEC=1` | Opt-in adicional para python_exec sin aislamiento OS |
+| `knowledge_db_enabled` | Habilita `knowledge_lookup` y `/api/knowledge/*` |
 | `BONSAI_BIN_SHA256` | SHA-256 explícito para `llama-server` (`--setup`; falla cerrada) |
 | `BONSAI_HTTP_LOG=1` | Access log del gateway |
 | `BONSAI_LOG_JSON=1` | Logs estructurados en `runtime/bonsai.log` |

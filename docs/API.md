@@ -50,7 +50,16 @@ source_type}`.
 | `POST` | `/api/rag/maintenance` | `{dry_run?, purge_documents?}` |
 | `POST` | `/api/rag` | legacy `{action: ...}` |
 
-## Experience persistence
+## Knowledge base
+
+| Method | Path | Body / query |
+|---|---|---|
+| `GET` | `/api/knowledge/status` | enabled flag and table counts |
+| `POST` | `/api/knowledge/query` | `{query, mode?, limit?}` |
+
+`mode` is `auto`, `structured`, `rag`, or `hybrid`. The endpoint requires a
+bearer token and is rate limited. Feature-disabled responses use
+`{error: "knowledge_db_disabled"}`.
 
 | Method | Path | Body |
 |---|---|---|

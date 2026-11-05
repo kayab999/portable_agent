@@ -56,6 +56,7 @@ def build_runtime(
     config = config or {}
     root = Path(root).resolve()
     toolbox = get_toolbox()
+    toolbox.knowledge_db_enabled = bool(config.get("knowledge_db_enabled", False))
 
     def warn(message: str) -> None:
         if on_warning:

@@ -92,6 +92,7 @@ Tokens live in RAM only and expire after 24 hours (or on restart).
 | Origin/Host hardening | Working |
 | Sandboxed read/write/list/stats tools | Working |
 | `python_exec` (opt-in, no OS isolation) | Working; separate unsafe gate |
+| `knowledge_lookup` (opt-in knowledge DB) | Working; `knowledge_db_enabled` |
 | `execute_command` / `fetch_url` | Working, power-gated |
 | Persona tool allowlists | Working |
 | Canonical `<tool_call>` protocol | Working, strict by default |
@@ -302,8 +303,8 @@ access to the vault can delete or replace it.
   indexing local files and retaining turns are privacy decisions.
 - **RAG is lexical.** FTS5/BM25 is the baseline; optional local embeddings are
   not part of 1.0.
-- **`knowledge_db.py` and `linter.py` are legacy.** They remain in the tree for
-  reference but are unreachable from the production entrypoint.
+- **`knowledge_db.py` is now an opt-in capability** (`knowledge_db_enabled`);
+  `linter.py` remains legacy and unreachable from production.
 - `agentportable.py` is a legacy compatibility shim that delegates to
   `launcher.main()`.
 - **IPv6 is not supported.** `ThreadingHTTPServer` is IPv4-only, so a configured

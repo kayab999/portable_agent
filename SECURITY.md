@@ -37,8 +37,8 @@ Do not include real vault passwords, API tokens, or private documents.
   tracked separately per client address.
 - **Loopback by default.** `host` is clamped to `127.0.0.1` unless
   `BONSAI_ALLOW_LAN=1`; IPv6 bind is rejected.
-- **Optional surfaces are off.** MCP, plugins, hooks, subagents and direct
-  `/api/tools` are disabled unless configured.
+- **Optional surfaces are off.** MCP, plugins, hooks, subagents, direct
+  `/api/tools`, and the knowledge base are disabled unless configured.
 - **Permissions fail closed.** Invalid permission configuration loads a
   deny-all policy, and MCP tools require an explicit allow rule.
 - **MCP protocol is strict.** The client uses per-request `_meta` and

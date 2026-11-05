@@ -57,6 +57,7 @@ ALLOWED_TOOLS = frozenset(
         "distill_all",
         "diagnose",
         "load_skill",
+        "knowledge_lookup",
     }
 )
 
@@ -632,9 +633,10 @@ def _is_under(path: Path, root: Path) -> bool:
 class Toolbox:
     """Agent tools confined to allowed filesystem roots."""
 
-    def __init__(self, workspace: Path = WORKSPACE):
+    def __init__(self, workspace: Path = WORKSPACE, knowledge_db_enabled: bool = False):
         self.workspace = Path(workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.knowledge_db_enabled = bool(knowledge_db_enabled)
         self.read_roots = (
             self.workspace,
             DOCS_DIR.resolve() if DOCS_DIR.exists() else self.workspace,
@@ -1343,6 +1345,40 @@ class Toolbox:
         except Exception as e:
             return {"ok": False, "error": "error_red", "message": str(e)}
 
+    def knowledge_lookup(self, query: str, mode: str = "auto", limit: int = 5) -> dict:
+        """Read-only structured knowledge lookup with deterministic routing."""
+        if not self.knowledge_db_enabled:
+            return {
+                "ok": False,
+                "error": "knowledge_db_disabled",
+                "message": "knowledge_lookup requiere knowledge_db_enabled=true.",
+            }
+        if not isinstance(query, str) or not query.strip():
+            return {
+                "ok": False,
+                "error": "query_vacia",
+                "message": "Se requiere una consulta no vacía.",
+            }
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "limit_invalido",
+                "message": "limit debe ser un entero.",
+            }
+        try:
+            from knowledge_router import KnowledgeRouter
+
+            router = KnowledgeRouter()
+            result = router.query(query, mode=mode, limit=limit)
+            result["ok"] = True
+            return result
+        except ValueError as e:
+            return {"ok": False, "error": "consulta_invalida", "message": str(e)}
+        except Exception as e:
+            return {"ok": False, "error": "knowledge_error", "message": str(e)}
+
     # ─── DIAGNOSTICS ──────────────────────────────────────────────────────────
 
     def distill_all(self) -> dict:
@@ -1765,7 +1801,14 @@ _toolbox: Toolbox | None = None
 def get_toolbox() -> Toolbox:
     global _toolbox
     if _toolbox is None:
-        _toolbox = Toolbox()
+        import os
+
+        _toolbox = Toolbox(
+            knowledge_db_enabled=os.environ.get(
+                "BONSAI_KNOWLEDGE_DB_ENABLED", ""
+            ).lower()
+            in ("1", "true", "yes", "on")
+        )
     return _toolbox
 
 

@@ -95,6 +95,11 @@ class TestGatewayAuth(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data.get("token"))
 
+    def test_knowledge_status_disabled_by_default(self):
+        status, data = self._req("GET", "/api/knowledge/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(data.get("enabled"))
+
     def test_confined_index_path_blocks_etc(self):
         self.assertIsNone(_confined_index_path("/etc"))
         self.assertIsNone(_confined_index_path("/etc/passwd"))

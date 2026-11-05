@@ -67,6 +67,7 @@ subagentes) vive en `runtime.py` y la comparten el launcher y ACP.
 | CSP sin scripts inline | Funciona (`script-src 'self'`) |
 | Herramientas read/write/list/stats | Funciona |
 | `python_exec` (opt-in, sin aislamiento OS) | Funciona; requiere gate unsafe aparte |
+| `knowledge_lookup` (BD de conocimiento opt-in) | Funciona; `knowledge_db_enabled` |
 | `execute_command` / `fetch_url` | Funciona, power-gated |
 | Allowlists de persona | Funciona |
 | Protocolo `<tool_call>` | Funciona, estricto por defecto |
@@ -292,8 +293,8 @@ Detalle operativo: `docs/OPERATIONS.md`.
   `experience_persistence: false`).
 - **RAG es léxico.** FTS5/BM25 es la base; embeddings locales no forman parte de
   1.0.
-- `knowledge_db.py` y `linter.py` son legacy y no son alcanzables desde el
-  entrypoint de producción.
+- `knowledge_db.py` se promovió a capability opt-in (`knowledge_db_enabled`);
+  `linter.py` sigue siendo legacy y no alcanzable desde producción.
 - `data/KAYAB_DATASETS` es opcional; elimina el symlink si no está montado.
 - Sin cifrado en reposo para `data/`: usa cifrado de disco completo si el equipo
   puede perderse.

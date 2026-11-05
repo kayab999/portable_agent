@@ -20,5 +20,7 @@
   "plugins_enable_mcp": false,
   "subagents_enabled": false,
   "yubikey_auto": false,
+  "knowledge_db_enabled": false,
+  "knowledge_context_enabled": false,
   "llm_port_offset": 100
 }

@@ -33,6 +33,8 @@ KNOWN_KEYS = frozenset(
         "yubikey_auto",
         "llm_port_offset",
         "max_iterations",
+        "knowledge_db_enabled",
+        "knowledge_context_enabled",
     }
 )
 
@@ -47,6 +49,8 @@ _BOOL_KEYS = (
     "plugins_enable_mcp",
     "subagents_enabled",
     "yubikey_auto",
+    "knowledge_db_enabled",
+    "knowledge_context_enabled",
 )
 
 

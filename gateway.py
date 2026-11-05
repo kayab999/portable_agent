@@ -127,6 +127,7 @@ class GatewayState:
         permissions=None,
         subagents_enabled: bool = False,
         subagent_index=None,
+        knowledge_db_enabled: bool = False,
     ):
         self.llm_base = llm_base.rstrip("/")
         self.debug_mode = debug_mode
@@ -159,6 +160,7 @@ class GatewayState:
         self.permissions = permissions
         self.subagents_enabled = subagents_enabled
         self.subagent_index = subagent_index
+        self.knowledge_db_enabled = bool(knowledge_db_enabled)
         self.rag_lock = threading.Lock()
         self.rate_limit = _RateBucket(max_requests=90, window_s=60.0)
         self.chat_rate_limit = _RateBucket(max_requests=30, window_s=60.0)
@@ -474,6 +476,21 @@ def make_handler(state: GatewayState):
                 )
                 return
 
+            if path == "/api/knowledge/status":
+                if not state.knowledge_db_enabled:
+                    self._json(200, {"enabled": False})
+                    return
+                try:
+                    from knowledge_router import KnowledgeRouter
+
+                    router = KnowledgeRouter()
+                    db = router._knowledge_db_instance()
+                    stats = db.stats() if db is not None else {}
+                    self._json(200, {"enabled": True, "stats": stats})
+                except Exception as e:
+                    self._json(500, {"error": "knowledge_error", "message": str(e)})
+                return
+
             if path == "/api/config":
                 self._json(
                     200,
@@ -568,6 +585,38 @@ def make_handler(state: GatewayState):
 
             if path == "/api/session/unlock":
                 self._handle_session_unlock()
+                return
+
+            if path == "/api/knowledge/query":
+                if not state.knowledge_db_enabled:
+                    self._json(404, {"error": "knowledge_db_disabled"})
+                    return
+                if not self._require_auth():
+                    return
+                if not self._require_rate():
+                    return
+                try:
+                    data = self._read_json()
+                except ValueError as e:
+                    self._json(413 if "exceeds" in str(e) else 400, {"error": str(e)})
+                    return
+                except Exception as e:
+                    self._json(400, {"error": f"invalid json: {e}"})
+                    return
+                try:
+                    from knowledge_router import KnowledgeRouter
+
+                    router = KnowledgeRouter()
+                    result = router.query(
+                        data.get("query", ""),
+                        mode=data.get("mode", "auto"),
+                        limit=data.get("limit", 5),
+                    )
+                    self._json(200, result)
+                except ValueError as e:
+                    self._json(400, {"error": "consulta_invalida", "message": str(e)})
+                except Exception as e:
+                    self._json(500, {"error": "knowledge_error", "message": str(e)})
                 return
 
             # All other API POSTs need auth when required

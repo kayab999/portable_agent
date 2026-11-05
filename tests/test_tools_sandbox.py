@@ -62,7 +62,10 @@ class TestToolsSandbox(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.tb.validate_path(str(evil / "secret.txt"))
 
-    def test_write_outside_denied(self):
+    def test_knowledge_lookup_disabled_by_default(self):
+        r = self.tb.knowledge_lookup("entropy")
+        self.assertFalse(r.get("ok"), r)
+        self.assertEqual(r.get("error"), "knowledge_db_disabled")
         r = self.tb.write_file("/tmp/bonsai_should_fail.txt", "x")
         self.assertFalse(r["ok"])
         self.assertEqual(r["error"], "acceso_denegado")

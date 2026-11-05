@@ -373,7 +373,35 @@ class TestExtractArchive(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runtime_core._extract_archive(arc, "llama-cli", out)
 
+    def test_zip_rejects_symlink(self):
+        import zipfile
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            arc = td / "bad.zip"
+            info = zipfile.ZipInfo("link")
+            info.external_attr = (0o120777 & 0xFFFF) << 16
+            with zipfile.ZipFile(arc, "w") as zf:
+                zf.writestr(info, "/etc/passwd")
+            out = td / "out"
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", out)
+
     def test_zip_rejects_path_traversal(self):
+        import zipfile
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            arc = td / "bad.zip"
+            with zipfile.ZipFile(arc, "w") as zf:
+                zf.writestr("../escape.txt", "bad")
+            out = td / "out"
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", out)
         import zipfile
         from pathlib import Path
         import tempfile

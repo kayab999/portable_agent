@@ -349,8 +349,11 @@ class MCPServer:
             self._legacy_handshake()
             return
         except (MCPTimeout, MCPError):
-            # Legacy servers often return an implementation-defined error for
-            # unknown pre-initialize methods; some do not answer at all.
+            # Legacy servers may not answer server/discover at all. Do not
+            # fall back when the process has already exited: that is a real
+            # failure, not an older protocol.
+            if self.proc is None or self.proc.poll() is not None:
+                raise
             self._legacy_handshake()
             return
         self._accept_discover(discovered)

@@ -154,23 +154,39 @@ def verify_file_sha256(path: Path, expected: str) -> str:
     return actual
 
 
+_ZIP_MAX_MEMBERS = 1000
+_ZIP_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+
+
 def _validate_zip_members(archive: zipfile.ZipFile) -> None:
-    """Reject unsafe ZIP member paths and symlinks."""
+    """Reject unsafe ZIP member paths, symlinks, duplicates, and bombs."""
     from pathlib import PurePosixPath
 
+    seen: set[str] = set()
+    total_size = 0
+    if len(archive.infolist()) > _ZIP_MAX_MEMBERS:
+        raise RuntimeError("ZIP archive contains too many members")
     for info in archive.infolist():
         name = info.filename
-        if not name or name.endswith("/"):
-            # Directory entries are still path-checked below.
-            pass
+        if not name:
+            raise RuntimeError("ZIP archive contains an empty member name")
+        if "\\" in name:
+            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
         posix = PurePosixPath(name)
         if posix.is_absolute() or ".." in posix.parts:
             raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
-        if any(part in ("", ".",) for part in posix.parts):
-            # Allow normal names; reject empty/traversal-ish components.
-            pass
+        if any(not part or part in (".",) for part in posix.parts):
+            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
+        if any(":" in part for part in posix.parts):
+            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
+        if name in seen:
+            raise RuntimeError(f"Duplicate ZIP member path: {name!r}")
+        seen.add(name)
+        total_size += int(info.file_size or 0)
+        if total_size > _ZIP_MAX_UNCOMPRESSED_BYTES:
+            raise RuntimeError("ZIP archive exceeds the uncompressed size limit")
         mode = (info.external_attr >> 16) & 0o170000
-        if mode == 0o120777 or mode == 0o120000:
+        if mode in (0o120777, 0o120000):
             raise RuntimeError(f"Symlinks are not allowed in ZIP archives: {name!r}")
 
 

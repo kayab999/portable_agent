@@ -42,11 +42,7 @@ else
 fi
 
 echo "== import contracts =="
-if command -v lint-imports &>/dev/null; then
-  lint-imports
-else
-  echo "  import-linter no disponible — saltando (pip install import-linter)"
-fi
+"$PYTHON" -m unittest tests.test_import_contracts -v
 
 echo "== dependency audit =="
 if command -v pip-audit &>/dev/null; then

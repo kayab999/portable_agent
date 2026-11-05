@@ -474,6 +474,19 @@ def agent_step(
             "raw": "",
         }
 
+    objective_success = bool(all_results) and all(
+        bool(r.get("ok")) for r in all_results
+    ) and bool((final or "").strip())
+    if objective_success:
+        task_state["done"] = True
+    task_state["task_outcome"] = (
+        "succeeded"
+        if objective_success
+        else "unsatisfied" if all_results
+        else "unverified"
+    )
+    task_state["model_reflection_success"] = ref_parsed["success"]
+
     experience = {
         "query": perception,
         "plan": plan,
@@ -481,11 +494,11 @@ def agent_step(
         "final": final,
         "reflection": ref_parsed["reflection"],
         "success": ref_parsed["success"],
+        "task_outcome": task_state["task_outcome"],
         "tool_results": [
             {"tool": r.get("tool"), "ok": r.get("ok")} for r in all_results
         ],
     }
-
     if persist:
         enqueue_experience(experience, db_path=db_path)
         if drain_queue:
@@ -499,8 +512,6 @@ def agent_step(
         if trace_enabled:
             emit_event(run_id, "run_completed", payload={"steps": len(all_results)})
 
-    if ref_parsed["success"]:
-        task_state["done"] = True
     task_state["steps"] = int(task_state.get("steps", 0)) + 1
     task_state["status"] = task_state.get("status") or "ok"
     task_state["final"] = final

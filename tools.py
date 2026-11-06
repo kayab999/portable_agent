@@ -447,6 +447,7 @@ _SSRF_BLOCKED_HOSTNAMES = frozenset(
 _SSRF_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _SSRF_MAX_REDIRECTS = 5
 _SSRF_MAX_RESPONSE_BYTES = 1024 * 1024  # 1 MiB
+MAX_READ_FILE_BYTES = 10 * 1024 * 1024  # 10 MiB
 
 
 class _SSRFError(ValueError):
@@ -1094,8 +1095,22 @@ class Toolbox:
                 "message": f"No es un archivo: {path}",
             }
         try:
-            content = safe.read_text(encoding="utf-8", errors="replace")
             size = safe.stat().st_size
+        except OSError as e:
+            return {"ok": False, "error": "error_lectura", "message": str(e)}
+        if size > MAX_READ_FILE_BYTES:
+            return {
+                "ok": False,
+                "error": "archivo_demasiado_grande",
+                "message": (
+                    "El archivo supera el límite de lectura "
+                    f"({MAX_READ_FILE_BYTES} bytes)"
+                ),
+                "size": size,
+                "limit": MAX_READ_FILE_BYTES,
+            }
+        try:
+            content = safe.read_text(encoding="utf-8", errors="replace")
             preview = content[:500] if len(content) > 500 else content
             if lines > 0:
                 content = "\n".join(content.splitlines()[:lines])

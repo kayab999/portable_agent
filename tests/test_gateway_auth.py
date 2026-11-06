@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 from http.client import HTTPConnection
 from pathlib import Path
 
@@ -147,12 +148,35 @@ class TestGatewayDebugMode(unittest.TestCase):
         except Exception:
             pass
 
-    def test_debug_identity_without_token(self):
+    def _req(self, method, path):
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request("GET", "/api/identity")
+        conn.request(method, path)
         resp = conn.getresponse()
-        self.assertEqual(resp.status, 200)
+        raw = resp.read()
         conn.close()
+        try:
+            parsed = json.loads(raw.decode()) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {"_raw": raw.decode("utf-8", errors="replace")}
+        return resp.status, parsed
+
+    def test_debug_identity_without_token(self):
+        status, data = self._req("GET", "/api/identity")
+        self.assertEqual(status, 200)
+
+    def test_internal_error_does_not_leak_details(self):
+        import persona
+
+        with mock.patch.object(
+            persona, "get_personas_list", side_effect=RuntimeError("SECRET_PATH_LEAK")
+        ):
+            with self.assertLogs("bonsai.gateway", level="ERROR") as captured:
+                status, data = self._req("GET", "/api/personas")
+        self.assertEqual(status, 500)
+        self.assertEqual(data.get("error"), "internal_error")
+        self.assertEqual(data.get("message"), "internal server error")
+        self.assertNotIn("SECRET_PATH_LEAK", json.dumps(data))
+        self.assertIn("SECRET_PATH_LEAK", "\n".join(captured.output))
 
 
 if __name__ == "__main__":

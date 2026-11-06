@@ -515,5 +515,24 @@ class TestAcpPromptText(unittest.TestCase):
             _prompt_text(["hi"])
 
 
+class TestAcpAsyncFallback(unittest.TestCase):
+    def test_unhandled_exception_still_returns_internal_error(self):
+        server = AcpServer()
+        writer = io.StringIO()
+        server._writer = writer
+
+        def boom(_message):
+            raise RuntimeError("SECRET_PATH_LEAK")
+
+        server.handle_message = boom
+        server._run_async(
+            {"jsonrpc": "2.0", "id": 7, "method": "session/prompt", "params": {}}
+        )
+        payload = json.loads(writer.getvalue())
+        self.assertEqual(payload["id"], 7)
+        self.assertEqual(payload["error"]["code"], -32603)
+        self.assertNotIn("SECRET_PATH_LEAK", writer.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

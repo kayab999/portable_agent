@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
+from bonsai_logging import get_logger, redact
 from model_client import HttpModelClient as _HttpModelClient
 from session_auth import SessionManager, Vault, extract_bearer
 
@@ -39,6 +40,8 @@ WORKSPACE_DIR = ROOT / "workspace"
 DATASETS_DIR = ROOT / "data" / "KAYAB_DATASETS"
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB
+_LOG = get_logger("gateway")
+
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -323,6 +326,26 @@ def make_handler(state: GatewayState):
         def _json(self, code: int, data: dict) -> None:
             self._send(code, _json_bytes(data), "application/json; charset=utf-8")
 
+        def _internal_error(
+            self,
+            exc: BaseException,
+            *,
+            code: int = 500,
+            error: str = "internal_error",
+        ) -> None:
+            """Log internal detail locally; never reflect it to the client."""
+            _LOG.error(
+                "internal error handling %s %s: %s",
+                getattr(self, "command", "?"),
+                getattr(self, "path", "?"),
+                redact(exc),
+                exc_info=True,
+            )
+            self._json(
+                code,
+                {"error": error, "message": "internal server error"},
+            )
+
         def _read_json(self) -> dict:
             length = int(self.headers.get("Content-Length", 0) or 0)
             if length < 0:
@@ -413,7 +436,7 @@ def make_handler(state: GatewayState):
                     e.headers.get("Content-Type", "application/json"),
                 )
             except Exception as e:
-                self._json(502, {"error": "llm_unavailable", "message": str(e)})
+                self._internal_error(e, code=502, error="llm_unavailable")
 
         def do_OPTIONS(self) -> None:
             if not self._request_guard(mutating=True):
@@ -490,7 +513,7 @@ def make_handler(state: GatewayState):
                     stats = db.stats() if db is not None else {}
                     self._json(200, {"enabled": True, "stats": stats})
                 except Exception as e:
-                    self._json(500, {"error": "knowledge_error", "message": str(e)})
+                    self._internal_error(e, error="knowledge_error")
                 return
 
             if path == "/api/runs":
@@ -652,7 +675,7 @@ def make_handler(state: GatewayState):
                 except ValueError as e:
                     self._json(400, {"error": "consulta_invalida", "message": str(e)})
                 except Exception as e:
-                    self._json(500, {"error": "knowledge_error", "message": str(e)})
+                    self._internal_error(e, error="knowledge_error")
                 return
 
             # All other API POSTs need auth when required
@@ -850,7 +873,7 @@ def make_handler(state: GatewayState):
                     },
                 )
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._internal_error(e)
 
         def _handle_personas_get(self) -> None:
             try:
@@ -858,7 +881,7 @@ def make_handler(state: GatewayState):
 
                 self._json(200, {"personas": get_personas_list()})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._internal_error(e)
 
         def _handle_subagents_get(self) -> None:
             if not state.subagents_enabled or state.subagent_index is None:
@@ -920,7 +943,7 @@ def make_handler(state: GatewayState):
             except ValueError as e:
                 self._json(400, {"error": str(e)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._internal_error(e)
 
         def _handle_identity_post(self) -> None:
             try:
@@ -965,7 +988,7 @@ def make_handler(state: GatewayState):
                 reset_identity()
                 self._json(200, {"ok": True})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._internal_error(e)
 
         def _handle_tools_get(self) -> None:
             try:
@@ -990,7 +1013,7 @@ def make_handler(state: GatewayState):
                     ]
                 self._json(200, payload)
             except Exception as e:
-                self._json(503, {"error": str(e)})
+                self._internal_error(e, code=503, error="tools_unavailable")
 
         def _handle_tools_post(self) -> None:
             # Direct tool execution is high risk — disabled unless allow_direct_tools
@@ -1044,7 +1067,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(e) else 400
                 self._json(code, {"error": str(e)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._internal_error(e)
 
         # -- RAG ---------------------------------------------------------
 
@@ -1091,7 +1114,7 @@ def make_handler(state: GatewayState):
                     },
                 )
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _handle_rag_sources_get(self, *, include_deleted: bool) -> None:
             if not state.rag_enabled:
@@ -1100,7 +1123,7 @@ def make_handler(state: GatewayState):
             try:
                 self._rag_sources_payload(include_deleted=include_deleted)
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _do_rag_query(
             self,
@@ -1178,7 +1201,7 @@ def make_handler(state: GatewayState):
                     path_prefix=path_prefix,
                 )
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _handle_rag_query_post(self) -> None:
             if not state.rag_enabled:
@@ -1196,7 +1219,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _do_rag_index(self, data: dict) -> None:
             from local_memory import DOCS_DIR as MEM_DOCS
@@ -1265,7 +1288,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _do_rag_delete_source(self, data: dict) -> None:
             try:
@@ -1293,7 +1316,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _do_rag_maintenance(self, data: dict) -> None:
             if not state.rag_lock.acquire(blocking=False):
@@ -1330,7 +1353,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _handle_rag_post(self) -> None:
             """Legacy single-endpoint API retained for UI/script compatibility."""
@@ -1373,7 +1396,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         # -- experience persistence --------------------------------------
 
@@ -1396,7 +1419,7 @@ def make_handler(state: GatewayState):
                     },
                 )
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _handle_experience_drain(self) -> None:
             if not state.persistence_enabled:
@@ -1430,7 +1453,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _handle_experience_purge_post(self) -> None:
             if not state.persistence_enabled:
@@ -1460,7 +1483,7 @@ def make_handler(state: GatewayState):
                 code = 413 if "exceeds" in str(exc) else 400
                 self._json(code, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": str(exc)})
+                self._internal_error(exc)
 
         def _handle_agent_chat(self) -> None:
             """Server-side agent loop with tools + optional RAG + output mask."""
@@ -1680,12 +1703,16 @@ def make_handler(state: GatewayState):
                 self._json(code, {"error": str(e)})
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="replace")[:500]
+                _LOG.error("llm http error %s: %s", e.code, redact(body))
                 self._json(
                     502,
-                    {"error": "llm_http_error", "message": f"{e.code}: {body}"},
+                    {
+                        "error": "llm_http_error",
+                        "message": f"upstream HTTP {e.code}",
+                    },
                 )
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._internal_error(e)
 
     return Handler
 

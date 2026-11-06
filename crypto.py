@@ -35,6 +35,7 @@ AUTH_ITERATIONS = ENC_ITERATIONS
 LEGACY_ENC_ITERATIONS = 100_000
 MIN_ENC_ITERATIONS = 100_000
 MAX_ENC_ITERATIONS = 2_000_000
+MAX_PASSWORD_CHARS = 1024
 NONCE_LEN = 16
 MAC_LEN = 32
 VERSION_V1 = 1
@@ -48,6 +49,10 @@ def derive_key(
     iterations: int = ENC_ITERATIONS,
 ) -> tuple[bytes, bytes]:
     """Derive a 256-bit encryption key from password via PBKDF2-HMAC-SHA256."""
+    if len(password) > MAX_PASSWORD_CHARS:
+        raise ValueError(
+            f"password exceeds maximum length ({MAX_PASSWORD_CHARS} characters)"
+        )
     if salt is None:
         salt = os.urandom(NONCE_LEN)
     if not MIN_ENC_ITERATIONS <= int(iterations) <= MAX_ENC_ITERATIONS:
@@ -157,6 +162,10 @@ def hash_password(
     *,
     iterations: int = AUTH_ITERATIONS,
 ) -> tuple[str, str]:
+    if len(password) > MAX_PASSWORD_CHARS:
+        raise ValueError(
+            f"password exceeds maximum length ({MAX_PASSWORD_CHARS} characters)"
+        )
     if salt is None:
         salt = os.urandom(NONCE_LEN)
     h = hashlib.pbkdf2_hmac(
@@ -172,6 +181,8 @@ def verify_password(
     *,
     iterations: int = AUTH_ITERATIONS,
 ) -> bool:
+    if len(password) > MAX_PASSWORD_CHARS:
+        return False
     try:
         salt = base64.b64decode(stored_salt)
     except Exception:

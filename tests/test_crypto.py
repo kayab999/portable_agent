@@ -2,12 +2,16 @@ import base64
 import unittest
 
 from crypto import (
+    MAX_PASSWORD_CHARS,
     _keystream,
     _split_keys,
     decrypt,
+    derive_key,
     encrypt,
     encrypt_canary,
+    hash_password,
     verify_canary,
+    verify_password,
 )
 
 
@@ -54,6 +58,15 @@ class TestCrypto(unittest.TestCase):
         ct = bytes(a ^ b for a, b in zip(pt, ks, strict=True))
         payload = base64.b64encode(nonce + ct).decode()
         self.assertEqual(decrypt(payload, key, allow_legacy=True), "migrate-me")
+
+    def test_password_length_is_bounded(self):
+        with self.assertRaises(ValueError):
+            derive_key("x" * (MAX_PASSWORD_CHARS + 1))
+        with self.assertRaises(ValueError):
+            hash_password("x" * (MAX_PASSWORD_CHARS + 1))
+        self.assertFalse(
+            verify_password("x" * (MAX_PASSWORD_CHARS + 1), "a", base64.b64encode(b"s").decode())
+        )
 
 
 if __name__ == "__main__":

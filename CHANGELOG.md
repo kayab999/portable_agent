@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Audit follow-up
+- **Gateway error hygiene.** 5xx responses no longer echo raw exception text;
+  details are recorded in the structured local log instead. Upstream HTTP
+  error bodies are logged but not reflected to the client.
+- **Bounded reads and credentials.** `read_file` refuses files larger than
+  10 MiB, and vault passwords are capped at 1024 characters to avoid
+  unbounded PBKDF2 work.
+- **ACP fallback.** An unexpected worker failure now still produces an
+  `INTERNAL_ERROR` JSON-RPC response instead of only logging to stderr.
+
 ### Consolidation hardening
 - **Archive extraction.** ZIP and TAR releases are extracted member by member
   instead of `extractall`. Absolute paths, `..`, backslashes, drive letters,

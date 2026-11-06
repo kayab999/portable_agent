@@ -8,6 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_MODULES = {"agentportable", "linter", "execution_loop"}
+STORAGE_MODULES = {"local_memory", "experience_store", "maintenance", "audit_worker"}
+TRANSPORT_MODULES = {"gateway", "acp_server", "launcher"}
 PRODUCTION_FILES = [
     path
     for path in ROOT.glob("*.py")
@@ -42,6 +44,18 @@ class TestImportContracts(unittest.TestCase):
             if bad:
                 violations.append(f"{path.name}: {', '.join(sorted(bad))}")
         self.assertEqual(violations, [])
+
+    def test_storage_does_not_import_transports(self):
+        violations: list[str] = []
+        for name in sorted(STORAGE_MODULES):
+            path = ROOT / f"{name}.py"
+            bad = _imported_modules(path) & TRANSPORT_MODULES
+            if bad:
+                violations.append(f"{name}.py: {', '.join(sorted(bad))}")
+        self.assertEqual(violations, [])
+
+    def test_acp_does_not_import_http_gateway(self):
+        self.assertNotIn("gateway", _imported_modules(ROOT / "acp_server.py"))
 
     def test_legacy_modules_are_guarded(self):
         for name in ("agentportable.py", "linter.py", "execution_loop.py"):

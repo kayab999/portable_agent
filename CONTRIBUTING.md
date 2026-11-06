@@ -11,9 +11,9 @@ python3 launcher.py --doctor
 ```
 
 The runtime itself is **stdlib-only**. Development tools may be installed in the
-virtualenv: `coverage`, `ruff`, `mypy`, `hypothesis`, `import-linter`,
-`pip-audit`, `bandit`, `playwright`, `mutmut`. See `docs/TESTING.md` for the full
-tooling guide, including browser and mutation-testing options.
+virtualenv: `coverage`, `ruff`, `mypy`, `hypothesis`, `pip-audit`, `bandit`,
+`playwright`, `mutmut`. See `docs/TESTING.md` for the full tooling guide,
+including browser and mutation-testing options.
 
 ## Quality gates
 
@@ -28,10 +28,11 @@ scripts/ci.sh
 Optional, when installed:
 
 ```bash
-lint-imports          # dependency contracts from pyproject.toml
-mypy <module>         # strict typing on production modules
-pip-audit             # dependency vulnerabilities
-bandit -r . -x .venv  # security lint
+mypy <module>          # strict typing on critical modules
+pip-audit -r requirements-dev.txt
+bandit -r . -x .venv   # security lint
+python scripts/secret_scan.py --history
+python scripts/generate_sbom.py
 ```
 
 ## Rules

@@ -355,6 +355,15 @@ class TestExtractArchive(unittest.TestCase):
             tf.add(root, arcname="llama-prism-test")
         return arc
 
+    def _make_zip(self, td: Path, entries: dict[str, bytes]) -> Path:
+        import zipfile
+
+        arc = td / "asset.zip"
+        with zipfile.ZipFile(arc, "w") as zf:
+            for name, body in entries.items():
+                zf.writestr(name, body)
+        return arc
+
     def test_targz_hoists_versioned_dir(self):
         with tempfile.TemporaryDirectory() as td:
             arc = self._make_targz(Path(td))
@@ -364,6 +373,21 @@ class TestExtractArchive(unittest.TestCase):
             self.assertTrue((out / "libllama-server-impl.so").exists())
             if __import__("os").name != "nt":
                 self.assertTrue((out / "llama-server").stat().st_mode & 0o111)
+
+    def test_zip_hoists_versioned_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            arc = self._make_zip(
+                td,
+                {
+                    "llama-prism-win/llama-server.exe": b"MZ-fake",
+                    "llama-prism-win/ll.dll": b"dll",
+                },
+            )
+            out = td / "windows" / "x86_64"
+            runtime_core._extract_archive(arc, "llama-server.exe", out)
+            self.assertEqual((out / "llama-server.exe").read_bytes(), b"MZ-fake")
+            self.assertTrue((out / "ll.dll").exists())
 
     def test_missing_exe_raises(self):
         with tempfile.TemporaryDirectory() as td:
@@ -375,8 +399,6 @@ class TestExtractArchive(unittest.TestCase):
 
     def test_zip_rejects_symlink(self):
         import zipfile
-        import tempfile
-        from pathlib import Path
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -385,51 +407,110 @@ class TestExtractArchive(unittest.TestCase):
             info.external_attr = (0o120777 & 0xFFFF) << 16
             with zipfile.ZipFile(arc, "w") as zf:
                 zf.writestr(info, "/etc/passwd")
-            out = td / "out"
             with self.assertRaises(RuntimeError):
-                runtime_core._extract_archive(arc, "llama-server", out)
+                runtime_core._extract_archive(arc, "llama-server", td / "out")
 
     def test_zip_rejects_path_traversal(self):
-        import zipfile
-        import tempfile
-        from pathlib import Path
-
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            arc = td / "bad.zip"
-            with zipfile.ZipFile(arc, "w") as zf:
-                zf.writestr("../escape.txt", "bad")
+            arc = self._make_zip(td, {"../escape.txt": b"bad"})
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", td / "out")
+            self.assertFalse((td / "escape.txt").exists())
+
+    def test_zip_rejects_absolute_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            arc = self._make_zip(td, {"/etc/escape": b"bad"})
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_zip_rejects_backslash_and_drive(self):
+        for name in ("dir\\escape", "C:/escape", "C:escape"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                arc = self._make_zip(td, {name: b"bad"})
+                with self.assertRaises(RuntimeError):
+                    runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_zip_rejects_reserved_names(self):
+        for name in ("CON", "nul.txt", "COM1", "aux/file"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                arc = self._make_zip(td, {name: b"bad"})
+                with self.assertRaises(RuntimeError):
+                    runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_zip_rejects_duplicate_and_casefold_collision(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            arc = self._make_zip(td, {"llama-server": b"one", "LLAMA-SERVER": b"two"})
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_zip_member_count_limit(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(
+            runtime_core, "_ARCHIVE_MAX_MEMBERS", 2
+        ):
+            td = Path(td)
+            arc = self._make_zip(
+                td, {"llama-server": b"x", "a": b"1", "b": b"2"}
+            )
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_zip_uncompressed_size_limit(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(
+            runtime_core, "_ARCHIVE_MAX_UNCOMPRESSED_BYTES", 4
+        ):
+            td = Path(td)
+            arc = self._make_zip(td, {"llama-server": b"12345"})
+            with self.assertRaises(RuntimeError):
+                runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_tar_rejects_symlink_and_hardlink(self):
+        import tarfile
+
+        for kind in ("sym", "link"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                arc = td / "asset.tar.gz"
+                with tarfile.open(arc, "w:gz") as tf:
+                    info = tarfile.TarInfo("llama-server")
+                    info.type = tarfile.SYMTYPE if kind == "sym" else tarfile.LNKTYPE
+                    info.linkname = "/etc/passwd"
+                    tf.addfile(info)
+                with self.assertRaises(RuntimeError):
+                    runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_tar_rejects_device_and_traversal(self):
+        import tarfile
+
+        for name, kind in (("/dev/null", tarfile.CHRTYPE), ("../escape", tarfile.REGTYPE)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                arc = td / "asset.tar.gz"
+                with tarfile.open(arc, "w:gz") as tf:
+                    info = tarfile.TarInfo(name)
+                    info.type = kind
+                    tf.addfile(info, __import__("io").BytesIO(b"x"))
+                with self.assertRaises(RuntimeError):
+                    runtime_core._extract_archive(arc, "llama-server", td / "out")
+
+    def test_failed_extraction_leaves_no_stage_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
             out = td / "out"
+            arc = self._make_zip(td, {"../escape": b"bad"})
             with self.assertRaises(RuntimeError):
                 runtime_core._extract_archive(arc, "llama-server", out)
-        import zipfile
-        from pathlib import Path
-        import tempfile
+            leftovers = list(out.parent.glob(".bonsai-stage-*"))
+            self.assertEqual(leftovers, [])
 
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            arc = td / "bad.zip"
-            with zipfile.ZipFile(arc, "w") as zf:
-                zf.writestr("../escape.txt", "bad")
-            out = td / "out"
-            with self.assertRaises(RuntimeError):
-                runtime_core._extract_archive(arc, "llama-server", out)
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            import zipfile
-
-            root = td / "llama-prism-win"
-            root.mkdir()
-            (root / "llama-server.exe").write_bytes(b"MZ-fake")
-            (root / "ll.dll").write_bytes(b"dll")
-            arc = td / "asset.zip"
-            with zipfile.ZipFile(arc, "w") as zf:
-                for f in root.rglob("*"):
-                    zf.write(f, f.relative_to(td))
-            out = td / "windows" / "x86_64"
-            runtime_core._extract_archive(arc, "llama-server.exe", out)
-            self.assertEqual((out / "llama-server.exe").read_bytes(), b"MZ-fake")
-            self.assertTrue((out / "ll.dll").exists())
 
 
 if __name__ == "__main__":

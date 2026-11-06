@@ -88,38 +88,3 @@ exclude_lines = [
   "if __name__ == .__main__.:",
   "raise NotImplementedError",
 ]
-
-[tool.importlinter]
-root_packages = [
-  "local_memory",
-  "experience_store",
-  "model_client",
-  "maintenance",
-  "audit_worker",
-  "context_builder",
-  "permissions",
-  "hooks",
-  "tools",
-  "mcp_client",
-  "gateway",
-  "acp_server",
-  "launcher",
-  "runtime",
-]
-
-[[tool.importlinter.contracts]]
-name = "Core storage must not depend on transports"
-type = "forbidden"
-source_modules = ["local_memory", "experience_store", "maintenance", "audit_worker"]
-forbidden_modules = ["gateway", "acp_server", "launcher"]
-
-[[tool.importlinter.contracts]]
-name = "Production must not import legacy modules"
-type = "forbidden"
-source_modules = [
-  "gateway", "runtime", "tools", "mcp_client", "permissions", "runtime_core",
-  "model_client", "session_auth", "hooks", "skills", "subagents",
-  "plugin_adapters", "context_builder", "agents_md", "acp_server", "launcher",
-  "runtime_core",
-]
-forbidden_modules = ["agentportable", "knowledge_db", "linter", "execution_loop"]

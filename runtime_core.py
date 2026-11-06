@@ -154,40 +154,128 @@ def verify_file_sha256(path: Path, expected: str) -> str:
     return actual
 
 
-_ZIP_MAX_MEMBERS = 1000
-_ZIP_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+_ARCHIVE_MAX_MEMBERS = 1000
+_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def _validate_member_name(name: str) -> tuple[str, ...]:
+    """Reject names that can escape the staging directory or alias on Windows."""
+    from pathlib import PurePosixPath
+
+    if not name or "\x00" in name:
+        raise RuntimeError("Archive contains an empty or NUL member name")
+    if "\\" in name:
+        raise RuntimeError(f"Unsafe archive member path: {name!r}")
+    posix = PurePosixPath(name)
+    if posix.is_absolute() or ".." in posix.parts:
+        raise RuntimeError(f"Unsafe archive member path: {name!r}")
+    for part in posix.parts:
+        if not part or part == ".":
+            raise RuntimeError(f"Unsafe archive member path: {name!r}")
+        if ":" in part:
+            raise RuntimeError(f"Unsafe archive member path: {name!r}")
+        # Windows strips trailing dots/spaces and treats CON, NUL, COM1… as
+        # devices. Rejecting them keeps extraction deterministic on every OS.
+        if part != part.rstrip(" ."):
+            raise RuntimeError(f"Unsafe archive member path: {name!r}")
+        stem = part.split(".", 1)[0].lower()
+        if stem in _WINDOWS_RESERVED_NAMES:
+            raise RuntimeError(f"Reserved archive member name: {name!r}")
+    return tuple(posix.parts)
 
 
 def _validate_zip_members(archive: zipfile.ZipFile) -> None:
     """Reject unsafe ZIP member paths, symlinks, duplicates, and bombs."""
-    from pathlib import PurePosixPath
-
+    infos = archive.infolist()
+    if len(infos) > _ARCHIVE_MAX_MEMBERS:
+        raise RuntimeError("ZIP archive contains too many members")
     seen: set[str] = set()
     total_size = 0
-    if len(archive.infolist()) > _ZIP_MAX_MEMBERS:
-        raise RuntimeError("ZIP archive contains too many members")
-    for info in archive.infolist():
+    for info in infos:
         name = info.filename
-        if not name:
-            raise RuntimeError("ZIP archive contains an empty member name")
-        if "\\" in name:
-            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
-        posix = PurePosixPath(name)
-        if posix.is_absolute() or ".." in posix.parts:
-            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
-        if any(not part or part in (".",) for part in posix.parts):
-            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
-        if any(":" in part for part in posix.parts):
-            raise RuntimeError(f"Unsafe ZIP member path: {name!r}")
-        if name in seen:
+        _validate_member_name(name)
+        folded = name.casefold()
+        if folded in seen:
             raise RuntimeError(f"Duplicate ZIP member path: {name!r}")
-        seen.add(name)
-        total_size += int(info.file_size or 0)
-        if total_size > _ZIP_MAX_UNCOMPRESSED_BYTES:
+        seen.add(folded)
+        total_size += max(0, int(info.file_size or 0))
+        if total_size > _ARCHIVE_MAX_UNCOMPRESSED_BYTES:
             raise RuntimeError("ZIP archive exceeds the uncompressed size limit")
+        if info.flag_bits & 0x1:
+            raise RuntimeError(f"Encrypted ZIP members are not allowed: {name!r}")
         mode = (info.external_attr >> 16) & 0o170000
         if mode in (0o120777, 0o120000):
             raise RuntimeError(f"Symlinks are not allowed in ZIP archives: {name!r}")
+        if mode not in (0, 0o040000, 0o100000):
+            raise RuntimeError(f"Special files are not allowed in ZIP archives: {name!r}")
+
+
+def _validate_tar_members(archive: tarfile.TarFile) -> None:
+    """Reject unsafe TAR members before any bytes are written to disk."""
+    members = archive.getmembers()
+    if len(members) > _ARCHIVE_MAX_MEMBERS:
+        raise RuntimeError("TAR archive contains too many members")
+    seen: set[str] = set()
+    total_size = 0
+    for member in members:
+        name = member.name
+        _validate_member_name(name)
+        folded = name.casefold()
+        if folded in seen:
+            raise RuntimeError(f"Duplicate TAR member path: {name!r}")
+        seen.add(folded)
+        if not (member.isdir() or member.isreg()):
+            kind = "symlink" if member.issym() else "hardlink" if member.islnk() else "special file"
+            raise RuntimeError(f"{kind.capitalize()} entries are not allowed in TAR archives: {name!r}")
+        total_size += max(0, int(member.size or 0))
+        if total_size > _ARCHIVE_MAX_UNCOMPRESSED_BYTES:
+            raise RuntimeError("TAR archive exceeds the uncompressed size limit")
+
+
+def _extract_zip(archive: Path, stage: Path) -> None:
+    """Extract a ZIP member-by-member without trusting ``extractall``."""
+    with zipfile.ZipFile(archive) as zf:
+        _validate_zip_members(zf)
+        root = stage.resolve()
+        for info in zf.infolist():
+            target = (stage / info.filename).resolve()
+            if target != root and root not in target.parents:
+                raise RuntimeError(f"ZIP member escapes staging: {info.filename!r}")
+            if info.is_dir() or info.filename.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as source, open(target, "xb") as destination:
+                shutil.copyfileobj(source, destination, length=256 * 1024)
+
+
+def _extract_tar(archive: Path, stage: Path) -> None:
+    """Extract a TAR member-by-member, rejecting links and special files."""
+    with tarfile.open(archive, "r:*") as tf:
+        _validate_tar_members(tf)
+        root = stage.resolve()
+        for member in tf.getmembers():
+            target = (stage / member.name).resolve()
+            if target != root and root not in target.parents:
+                raise RuntimeError(f"TAR member escapes staging: {member.name!r}")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = tf.extractfile(member)
+            if source is None:
+                raise RuntimeError(f"TAR member has no data: {member.name!r}")
+            with source, open(target, "xb") as destination:
+                shutil.copyfileobj(source, destination, length=256 * 1024)
+            try:
+                os.chmod(target, 0o755 if member.mode & 0o111 else 0o644)
+            except OSError:
+                pass
 
 
 def _extract_archive(archive: Path, exe_name: str, dest_dir: Path) -> None:
@@ -199,31 +287,37 @@ def _extract_archive(archive: Path, exe_name: str, dest_dir: Path) -> None:
     la ruta esperada (`dest_dir/<exe>`) funcione con todos los .so hermanos.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    stage = archive.parent / "stage"
-    stage.mkdir(exist_ok=True)
-    if archive.suffix == ".zip":
-        with zipfile.ZipFile(archive) as zf:
-            _validate_zip_members(zf)
-            zf.extractall(stage)
-    else:
-        with tarfile.open(archive, "r:gz") as tf:
-            tf.extractall(stage, filter="data")
+    stage = Path(tempfile.mkdtemp(prefix=".bonsai-stage-", dir=str(dest_dir.parent)))
+    try:
+        if archive.suffix == ".zip":
+            _extract_zip(archive, stage)
+        else:
+            _extract_tar(archive, stage)
 
-    exe = next(stage.rglob(exe_name), None)
-    if not exe:
-        raise RuntimeError(f"{exe_name} no encontrado dentro de {archive.name}")
+        exe = next(
+            (
+                candidate
+                for candidate in stage.rglob(exe_name)
+                if candidate.is_file() and not candidate.is_symlink()
+            ),
+            None,
+        )
+        if not exe:
+            raise RuntimeError(f"{exe_name} no encontrado dentro de {archive.name}")
 
-    src_dir = exe.parent
-    if src_dir == dest_dir:
-        pass
-    else:
-        for item in src_dir.iterdir():
-            shutil.move(str(item), dest_dir / item.name)
-            if item.is_file() and "." not in item.name:
-                (dest_dir / item.name).chmod(0o755)
-    exe_dest = dest_dir / exe_name
-    if os.name != "nt":
-        exe_dest.chmod(0o755)
+        src_dir = exe.parent
+        for item in sorted(src_dir.iterdir()):
+            target = dest_dir / item.name
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            shutil.move(str(item), str(target))
+        exe_dest = dest_dir / exe_name
+        if os.name != "nt":
+            exe_dest.chmod(0o755)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def pick_release_asset(
@@ -408,6 +502,9 @@ def load_config(cfg_file: Path) -> dict:
         "subagents_enabled": False,
         "yubikey_auto": False,
         "llm_port_offset": 100,
+        "max_iterations": 5,
+        "max_tool_calls": 16,
+        "max_runtime_seconds": 300,
     }
     if cfg_file.exists():
         try:

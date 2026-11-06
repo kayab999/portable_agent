@@ -1,4 +1,4 @@
-# ADR 008 — CSP forbids inline script
+# ADR 010 — CSP forbids inline script
 
 Status: accepted
 

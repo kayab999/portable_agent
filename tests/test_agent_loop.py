@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_loop import (
     agent_step,
+    evaluate_task_outcome,
     extract_tool_calls,
     filter_calls_by_persona,
     legacy_tool_line_to_calls,
@@ -35,6 +36,104 @@ class TestAgentLoop(unittest.TestCase):
     def test_parse_reflection_keywords(self):
         r = parse_reflection("The task was a complete failure and error")
         self.assertFalse(r["success"])
+
+    def test_objective_outcome_requires_tool_evidence_and_final(self):
+        self.assertEqual(
+            evaluate_task_outcome("done", [{"tool": "t", "ok": True}])[
+                "task_outcome"
+            ],
+            "succeeded",
+        )
+        self.assertEqual(
+            evaluate_task_outcome("done", [])["task_outcome"], "unverified"
+        )
+        self.assertEqual(
+            evaluate_task_outcome(
+                "done", [{"tool": "t", "ok": False}]
+            )["task_outcome"],
+            "unsatisfied",
+        )
+        self.assertEqual(
+            evaluate_task_outcome("", [{"tool": "t", "ok": True}])[
+                "task_outcome"
+            ],
+            "unsatisfied",
+        )
+
+    def test_tool_call_budget_stops_and_blocks_success(self):
+        from unittest import mock
+
+        class ToolClient:
+            def chat_completion(self, model, messages):
+                return {
+                    "content": '<tool_call>{"tool": "t", "args": {}}</tool_call>'
+                }
+
+        state = {"goal": "loop", "steps": 0, "done": False}
+        with mock.patch(
+            "agent_loop.run_tool_cycle",
+            return_value=([{"tool": "t", "ok": True}], "ok"),
+        ) as cycle:
+            out = agent_step(
+                "go",
+                ToolClient(),
+                state,
+                system_prompt="sys",
+                max_tool_rounds=10,
+                config={"max_tool_calls": 2},
+            )
+        self.assertEqual(cycle.call_count, 2)
+        self.assertEqual(out["budget_exhausted"], "max_tool_calls")
+        self.assertEqual(out["task_outcome"], "unsatisfied")
+        self.assertFalse(out.get("done"))
+
+    def test_objective_success_requires_explicit_verifier(self):
+        result = evaluate_task_outcome("done", [{"tool": "t", "ok": True}])
+        self.assertTrue(result["tool_execution_success"])
+        self.assertFalse(result["objective_success"])
+        self.assertFalse(result["objective_verified"])
+        self.assertEqual(result["verification_level"], "tool_execution")
+        self.assertEqual(result["evidence"][-1]["kind"], "verification")
+        self.assertEqual(result["evidence"][-1]["level"], "tool_execution")
+
+        verified = evaluate_task_outcome(
+            "done", [{"tool": "t", "ok": True}], objective_verified=True
+        )
+        self.assertTrue(verified["objective_success"])
+        self.assertEqual(verified["verification_level"], "objective")
+
+    def test_reflection_cannot_mark_failed_tool_as_success(self):
+        tmp = Path(tempfile.mkdtemp())
+        db = tmp / "runs.db"
+        try:
+            client = FakeClient(
+                [
+                    '<tool_call>{"tool": "does_not_exist", "args": {}}</tool_call>',
+                    "FINAL ANSWER: done",
+                    '{"success": true, "reflection": "looks good"}',
+                ]
+            )
+            state = {"goal": "test failure evidence", "steps": 0, "done": False}
+            out = agent_step(
+                "hello",
+                client,
+                state,
+                system_prompt="sys",
+                model="test",
+                persist_run=True,
+                db_path=db,
+            )
+            self.assertEqual(out["task_outcome"], "unsatisfied")
+            self.assertFalse(out.get("done"))
+            self.assertTrue(out["model_reflection_success"])
+            import agent_runs
+
+            runs = agent_runs.list_runs(db_path=db)
+            run = agent_runs.get_run(runs[0]["run_id"], db_path=db)
+            self.assertEqual(run["task_outcome"], "unsatisfied")
+            self.assertTrue(run["evidence"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_legacy_tool_line(self):
         calls = legacy_tool_line_to_calls("TOOL: list_dir .")

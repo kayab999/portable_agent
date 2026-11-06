@@ -6,7 +6,6 @@
 coverage==7.17.2
 ruff==0.15.15
 mypy>=1.10,<2
-import-linter>=2.0,<3
 pip-audit>=2.7,<3
 bandit>=1.7,<2
 hypothesis>=6.100,<7

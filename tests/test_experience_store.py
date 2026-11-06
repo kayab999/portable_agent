@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,64 @@ class TestExperienceStore(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_schema_migration_adds_category_to_legacy_events(self):
+        conn = sqlite3.connect(self.db)
+        conn.executescript(
+            """
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                available_at INTEGER NOT NULL,
+                locked_by TEXT,
+                locked_at INTEGER,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                processed_at INTEGER
+            );
+            INSERT INTO events
+                (event_type, payload, idempotency_key, available_at,
+                 created_at, updated_at)
+            VALUES ('PERSIST', '{}', 'legacy-key', 1, 1, 1);
+            """
+        )
+        conn.commit()
+        experience_store.ensure_schema(conn)
+        row = conn.execute(
+            "SELECT category FROM events WHERE idempotency_key = 'legacy-key'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row[0], "unverified_experience")
+
+    def test_experience_category_is_derived_and_persisted(self):
+        cases = {
+            "verified_result": {
+                "provenance": {"category": "verified_result"},
+                "tool_results": [{"ok": True}],
+            },
+            "tool_observation": {"tool_results": [{"ok": True}]},
+            "model_assertion": {"success": True},
+            "unverified_experience": {"success": False},
+        }
+        for expected, payload in cases.items():
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    experience_store.classify_experience(payload), expected
+                )
+                experience_store.enqueue("PERSIST", payload, db_path=self.db)
+                conn = experience_store._connect(self.db)
+                try:
+                    row = conn.execute(
+                        "SELECT category FROM events ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                finally:
+                    conn.close()
+                self.assertEqual(row["category"], expected)
 
     def test_enqueue_is_idempotent(self):
         first = experience_store.enqueue("PERSIST", {"query": "a"}, db_path=self.db)

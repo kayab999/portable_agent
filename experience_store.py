@@ -30,6 +30,33 @@ RETENTION_SECONDS = 7 * 24 * 60 * 60
 BACKOFF_BASE_SECONDS = 30
 BACKOFF_MAX_SECONDS = 3600
 
+EXPERIENCE_CATEGORIES = frozenset(
+    {
+        "model_assertion",
+        "tool_observation",
+        "verified_result",
+        "operator_approved",
+        "unverified_experience",
+    }
+)
+
+
+def classify_experience(payload: dict) -> str:
+    """Classify an experience by provenance, defaulting to unverified."""
+    if not isinstance(payload, dict):
+        return "unverified_experience"
+    provenance = payload.get("provenance")
+    if isinstance(provenance, dict):
+        category = provenance.get("category")
+        if category in EXPERIENCE_CATEGORIES:
+            return str(category)
+    if payload.get("tool_results"):
+        return "tool_observation"
+    if payload.get("success"):
+        return "model_assertion"
+    return "unverified_experience"
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +71,8 @@ CREATE TABLE IF NOT EXISTS events (
     last_error TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    processed_at INTEGER
+    processed_at INTEGER,
+    category TEXT NOT NULL DEFAULT 'unverified_experience'
 );
 CREATE INDEX IF NOT EXISTS idx_events_ready
     ON events(status, available_at, id);
@@ -77,6 +105,14 @@ def _idempotency_key(event_type: str, payload: str) -> str:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(events)")
+    }
+    if "category" not in columns:
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN category TEXT "
+            "NOT NULL DEFAULT 'unverified_experience'"
+        )
     # Migrate the rc.5 fire-and-forget queue if it is still present.
     legacy = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_queue'"
@@ -122,14 +158,23 @@ def enqueue(
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     idem = key or _idempotency_key(event_type, body)
     now = int(time.time())
+    category = classify_experience(payload)
     conn = _connect(db_path)
     try:
         cur = conn.execute(
             """INSERT OR IGNORE INTO events
                (event_type, payload, idempotency_key, status, attempts,
-                available_at, created_at, updated_at)
-               VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)""",
-            (event_type, body, idem, available_at if available_at is not None else now, now, now),
+                available_at, created_at, updated_at, category)
+               VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)""",
+            (
+                event_type,
+                body,
+                idem,
+                available_at if available_at is not None else now,
+                now,
+                now,
+                category,
+            ),
         )
         if cur.rowcount == 0:
             return 0

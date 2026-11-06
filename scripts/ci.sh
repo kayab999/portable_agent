@@ -44,9 +44,21 @@ fi
 echo "== import contracts =="
 "$PYTHON" -m unittest tests.test_import_contracts -v
 
+echo "== secret scan (tree + history) =="
+"$PYTHON" scripts/secret_scan.py --history
+
+echo "== critical type checks =="
+if command -v mypy &>/dev/null; then
+  mypy --config-file pyproject.toml --follow-imports=skip \
+    crypto.py session_auth.py runtime_core.py permissions.py hooks.py \
+    mcp_client.py agent_runs.py agent_loop.py config_schema.py
+else
+  echo "  mypy no disponible — saltando (pip install mypy)"
+fi
+
 echo "== dependency audit =="
 if command -v pip-audit &>/dev/null; then
-  pip-audit --skip-editable || true
+  pip-audit -r requirements-dev.txt --progress-spinner off
 else
   echo "  pip-audit no disponible — saltando (pip install pip-audit)"
 fi

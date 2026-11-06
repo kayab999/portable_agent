@@ -16,7 +16,9 @@ ROOT = Path(__file__).parent.resolve()
 DB_DIR = ROOT / "data"
 DB_PATH = DB_DIR / "agent_runs.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+TASK_OUTCOMES = frozenset({"succeeded", "unsatisfied", "unverified"})
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -46,7 +48,9 @@ def _init_db(db_path: Path = DB_PATH) -> None:
                 model TEXT,
                 config_json TEXT,
                 final_answer TEXT,
-                error TEXT
+                error TEXT,
+                task_outcome TEXT,
+                evidence_json TEXT
             );
             CREATE TABLE IF NOT EXISTS agent_steps (
                 step_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +72,14 @@ def _init_db(db_path: Path = DB_PATH) -> None:
                 ON agent_runs(status, updated_at);
             """
         )
+        # Forward migration for databases created before evidence recording.
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(agent_runs)")
+        }
+        if "task_outcome" not in columns:
+            conn.execute("ALTER TABLE agent_runs ADD COLUMN task_outcome TEXT")
+        if "evidence_json" not in columns:
+            conn.execute("ALTER TABLE agent_runs ADD COLUMN evidence_json TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -139,7 +151,7 @@ def record_step(
                 (error or "")[:2000],
             ),
         )
-        step_id = int(cur.lastrowid)
+        step_id = int(cur.lastrowid or 0)
         conn.execute(
             "UPDATE agent_runs SET updated_at = ? WHERE run_id = ?",
             (now, run_id),
@@ -190,19 +202,69 @@ def finish_run(
     status: str,
     final_answer: str = "",
     error: str = "",
+    task_outcome: str | None = None,
+    evidence: list[dict] | None = None,
     db_path: Path = DB_PATH,
 ) -> None:
+    """Finish a run without allowing contradictory terminal transitions."""
+    if task_outcome is not None and task_outcome not in TASK_OUTCOMES:
+        raise ValueError(f"invalid task_outcome: {task_outcome!r}")
     _init_db(db_path)
     now = int(time.time())
     conn = _connect(db_path)
     try:
+        # Serialize the read-check-write so two finishers cannot both observe
+        # a non-terminal run and overwrite each other.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, final_answer, error, task_outcome, evidence_json "
+            "FROM agent_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown run_id: {run_id!r}")
+        current = str(row["status"])
+        if current in TERMINAL_RUN_STATUSES:
+            if current != status:
+                raise ValueError(
+                    f"run {run_id!r} is already {current}; "
+                    f"refusing transition to {status}"
+                )
+            incoming = (
+                (final_answer or "")[:20000],
+                (error or "")[:2000],
+                task_outcome,
+                _dump(evidence) if evidence is not None else None,
+            )
+            existing = (
+                row["final_answer"],
+                row["error"],
+                row["task_outcome"],
+                row["evidence_json"],
+            )
+            if incoming != existing:
+                raise ValueError(
+                    f"run {run_id!r} is already finished; "
+                    "refusing to overwrite its recorded evidence"
+                )
+            # Repeating the exact same terminal write is a no-op.
+            return
         conn.execute(
             """
             UPDATE agent_runs
-            SET updated_at = ?, status = ?, final_answer = ?, error = ?
+            SET updated_at = ?, status = ?, final_answer = ?, error = ?,
+                task_outcome = ?, evidence_json = ?
             WHERE run_id = ?
             """,
-            (now, status, (final_answer or "")[:20000], (error or "")[:2000], run_id),
+            (
+                now,
+                status,
+                (final_answer or "")[:20000],
+                (error or "")[:2000],
+                task_outcome,
+                _dump(evidence) if evidence is not None else None,
+                run_id,
+            ),
         )
         conn.commit()
     finally:
@@ -219,6 +281,11 @@ def get_run(run_id: str, db_path: Path = DB_PATH) -> dict | None:
         if row is None:
             return None
         run = dict(row)
+        if run.get("evidence_json"):
+            try:
+                run["evidence"] = json.loads(run["evidence_json"])
+            except (TypeError, ValueError):
+                run["evidence"] = []
         steps = conn.execute(
             "SELECT * FROM agent_steps WHERE run_id = ? ORDER BY step_index",
             (run_id,),
@@ -239,6 +306,33 @@ def list_runs(limit: int = 20, db_path: Path = DB_PATH) -> list[dict]:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def recover_stale_runs(
+    older_than_seconds: int = 3600, db_path: Path = DB_PATH
+) -> int:
+    """Mark abandoned ``running`` runs as failed after a crash or restart."""
+    _init_db(db_path)
+    cutoff = int(time.time()) - max(60, int(older_than_seconds))
+    now = int(time.time())
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = 'failed', updated_at = ?,
+                error = CASE WHEN error IS NULL OR error = ''
+                             THEN 'stale run recovered' ELSE error END,
+                task_outcome = CASE WHEN task_outcome IS NULL
+                                    THEN 'unverified' ELSE task_outcome END
+            WHERE status = 'running' AND updated_at < ?
+            """,
+            (now, cutoff),
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 

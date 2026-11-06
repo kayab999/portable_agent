@@ -60,8 +60,33 @@ Do not include real vault passwords, API tokens, or private documents.
 - **Downloads are integrity-checked.** `--setup` pins model SHA-256 hashes in
   `MODEL_CATALOG` and requires the GitHub release digest (or explicit
   `BONSAI_BIN_SHA256`) for `llama-server`. Mismatches delete the partial
-  file and fail closed; hashing is streaming. ZIP members are validated
-  before extraction.
+  file and fail closed; hashing is streaming. ZIP/TAR members are validated
+  and extracted one by one with traversal, absolute-path, symlink, hardlink,
+  device, duplicate, reserved-name and size/count protections.
+- **Task success is evidence-based.** A run is `succeeded` when at least one
+  tool result exists, every tool result is ok, and a non-empty final answer is
+  present. This is **tool-execution success, not proof that the user's
+  objective was achieved**: a command can exit 0 while writing the wrong file.
+  `objective_success` stays false unless a task-specific checker supplies
+  `objective_verified=True`; no such checker is registered by default. A
+  text-only answer is `unverified`; a failed tool or a missing final answer
+  after tool use is `unsatisfied`. The model reflection is stored separately
+  and can never mark a run as done.
+- **Execution budgets are scoped per step/invocation.** `max_tool_calls`
+  (default 16) and `max_runtime_seconds` (default 300) stop runaway loops in a
+  single `agent_step` or `interactive_react` call. They are not a whole-task
+  deadline: a multi-step task gets a fresh budget per step, so an outer
+  scheduler must enforce a global limit when needed. A budget-exhausted run is
+  never reported as verified success.
+- **Process-tree termination is complete on POSIX only.** `execute_command`
+  and `python_exec` start a new session and kill the whole process group on
+  timeout on Linux/macOS. On Windows only the direct child is killed, so
+  grandchildren may survive; this is a bounded convenience runner, not a
+  cross-platform sandbox.
+- **Release evidence is generated.** CI blocks on critical-module mypy,
+  `pip-audit -r requirements-dev.txt`, and high-confidence secret scanning of
+  the working tree and git history, and publishes a deterministic CycloneDX
+  SBOM artifact.
 - **External content is delimited.** AGENTS.md, skills, MCP metadata, RAG
   results and user sources are wrapped in `<<<BONSAI_*>>>` blocks and can never
   grant permissions or authorize tool use.

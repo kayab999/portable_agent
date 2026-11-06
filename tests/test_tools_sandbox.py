@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +15,7 @@ from unittest import mock
 from tools import (
     ALLOWED_TOOLS,
     Toolbox,
+    _run_bounded,
     execute_tool_calls,
     format_tool_results,
     parse_tool_calls,
@@ -108,6 +112,17 @@ class TestToolsSandbox(unittest.TestCase):
         r = self.tb.execute_command("ls")
         self.assertTrue(r["ok"], r)
         self.assertIn("marker.txt", r.get("stdout", ""))
+
+    def test_run_bounded_kills_process_group_on_timeout(self):
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            _run_bounded(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=str(self.ws),
+                env={"PATH": "/usr/bin:/bin"},
+                timeout=0.2,
+            )
+        self.assertLess(time.monotonic() - started, 10)
 
     def test_list_tool_names(self):
         names = self.tb.list_tool_names()

@@ -1,4 +1,4 @@
-# ADR 007 — Experience queue uses claim/lease/retry
+# ADR 009 — Experience queue uses claim/lease/retry
 
 Status: accepted
 

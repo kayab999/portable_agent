@@ -126,13 +126,24 @@ def _validate_result(server: str, method: str, result: dict) -> dict:
     )
 
 
+def _validate_tool_name(name: str) -> None:
+    """Reject names that cannot be namespaced unambiguously."""
+    if len(name) > 128:
+        raise MCPError("MCP tool name exceeds 128 characters")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in name):
+        raise MCPError("MCP tool name contains control characters")
+    if not _NAME_RE.sub("_", name).strip("_"):
+        raise MCPError(f"MCP tool name {name!r} has no usable characters")
+
+
 def _normalize_tool_allowlist(
     tools_allow: object, allow_all_tools: bool = False
 ) -> tuple[str, ...] | None:
     """Return ``None`` for explicit all-tools, ``()`` for deny-all, or a list.
 
     Omitting both ``tools_allow`` and ``allow_all_tools`` now denies all tools.
-    This avoids implicit privileges from an omitted field.
+    This avoids implicit privileges from an omitted field. An explicit empty
+    ``tools_allow`` always wins over ``allow_all_tools`` (deny-all).
     """
     if allow_all_tools and tools_allow is None:
         return None
@@ -144,7 +155,10 @@ def _normalize_tool_allowlist(
     for item in tools_allow:
         if not isinstance(item, str) or not item.strip():
             raise MCPError("tools_allow entries must be non-empty strings")
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in item):
+            raise MCPError("tools_allow entries must not contain control characters")
         name = item.strip()
+        _validate_tool_name(name)
         if name not in normalized:
             normalized.append(name)
     return tuple(normalized)
@@ -432,6 +446,7 @@ class MCPServer:
 
     def list_tools(self) -> list[MCPTool]:
         tools: list[MCPTool] = []
+        namespace_seen: set[str] = set()
         cursor = None
         seen_cursors: set[str] = set()
         page_count = 0
@@ -441,7 +456,7 @@ class MCPServer:
                 raise MCPError(
                     f"MCP {self.name}: tools/list exceeded {MAX_TOOL_PAGES} pages"
                 )
-            params = {"cursor": cursor} if cursor else {}
+            params: dict[str, object] = {"cursor": cursor} if cursor else {}
             result = self._request("tools/list", params)
             for raw in result.get("tools") or []:
                 if not isinstance(raw, dict):
@@ -449,12 +464,19 @@ class MCPServer:
                 original = str(raw.get("name") or "").strip()
                 if not original:
                     continue
+                _validate_tool_name(original)
                 if self.tools_allow is not None and original not in self.tools_allow:
                     continue
                 namespaced = (
                     f"mcp__{_NAME_RE.sub('_', self.name)}__"
                     f"{_NAME_RE.sub('_', original)}"
                 )
+                if namespaced in namespace_seen:
+                    raise MCPError(
+                        f"MCP {self.name}: tool {original!r} collides on "
+                        f"namespaced name {namespaced!r}; refusing to expose it"
+                    )
+                namespace_seen.add(namespaced)
                 schema = raw.get("inputSchema")
                 tools.append(
                     MCPTool(
@@ -586,6 +608,7 @@ class MCPManager:
     def from_config(cls, configs: list[dict] | None) -> "MCPManager":
         servers: list[MCPServer] = []
         errors: list[dict] = []
+        seen_names: set[str] = set()
         for raw in configs or []:
             if not isinstance(raw, dict) or not raw.get("enabled", False):
                 continue
@@ -603,18 +626,21 @@ class MCPManager:
                     raw.get("allow_all_tools"), bool
                 ):
                     raise MCPError("allow_all_tools must be a boolean")
-                servers.append(
-                    MCPServer(
-                        name=str(raw.get("name", "")),
-                        command=str(raw.get("command", "")),
-                        args=raw.get("args") or [],
-                        env=raw.get("env") or {},
-                        cwd=raw.get("cwd"),
-                        tools_allow=tools_allow,
-                        allow_all_tools=allow_all_tools,
-                        timeout=float(raw.get("timeout", DEFAULT_TIMEOUT)),
-                    )
+                name = str(raw.get("name", ""))
+                if name in seen_names:
+                    raise MCPError(f"duplicate MCP server name: {name!r}")
+                server = MCPServer(
+                    name=name,
+                    command=str(raw.get("command", "")),
+                    args=raw.get("args") or [],
+                    env=raw.get("env") or {},
+                    cwd=raw.get("cwd"),
+                    tools_allow=tools_allow,
+                    allow_all_tools=allow_all_tools,
+                    timeout=float(raw.get("timeout", DEFAULT_TIMEOUT)),
                 )
+                seen_names.add(name)
+                servers.append(server)
             except (MCPError, TypeError, ValueError) as exc:
                 errors.append({"name": raw.get("name"), "error": str(exc)})
         manager = cls(servers)
@@ -622,6 +648,7 @@ class MCPManager:
         return manager
 
     def start_all(self) -> "MCPManager":
+        accepted: set[str] = set()
         for server in list(self.servers.values()):
             if server.tools_allow == ():
                 # Explicit empty allowlist: do not spawn a process that can
@@ -629,11 +656,30 @@ class MCPManager:
                 continue
             try:
                 server.start()
-                server.list_tools()
+                tools = server.list_tools()
             except (MCPError, OSError) as exc:
                 self.errors.append({"name": server.name, "error": str(exc)})
                 server.close()
                 self.servers.pop(server.name, None)
+                continue
+            collisions = accepted & {tool.namespaced for tool in tools}
+            if collisions:
+                # Two server names can sanitize to the same prefix (for
+                # example "a b" and "a/b"). Exposing both would make dispatch
+                # ambiguous, so the later server fails closed.
+                self.errors.append(
+                    {
+                        "name": server.name,
+                        "error": (
+                            "MCP namespace collision: "
+                            f"{sorted(collisions)[0]}"
+                        ),
+                    }
+                )
+                server.close()
+                self.servers.pop(server.name, None)
+                continue
+            accepted |= {tool.namespaced for tool in tools}
         return self
 
     def tools(self) -> list[MCPTool]:
@@ -655,11 +701,14 @@ class MCPManager:
         return "\n".join(lines)
 
     def resolve(self, namespaced: str) -> tuple[MCPServer, MCPTool] | None:
-        for server in self.servers.values():
-            for tool in server.tools:
-                if tool.namespaced == namespaced:
-                    return server, tool
-        return None
+        matches = [
+            (server, tool)
+            for server in self.servers.values()
+            for tool in server.tools
+            if tool.namespaced == namespaced
+        ]
+        # More than one match means an ambiguous namespace: refuse to pick one.
+        return matches[0] if len(matches) == 1 else None
 
     def call(self, namespaced: str, arguments: dict) -> dict:
         found = self.resolve(namespaced)

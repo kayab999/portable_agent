@@ -325,6 +325,7 @@ python3 scripts/check_coverage.py
 python3 redteam/run_all.py
 ```
 
-Suite rc.5: **295 tests, 1 skip** (`pwsh` ausente), con pisos de cobertura por
-módulo, contratos de importación, comprobaciones de CSP/UI, migración
-v1→v2 de RAG, semántica de leases/reintentos y probes de producción.
+Suite actual: **402 tests, 397 passing + 5 skips** (`pwsh` y binario
+`llama-server` ausentes), con pisos de cobertura por módulo, contratos de
+importación, comprobaciones de CSP/UI, migración v1→v2 de RAG, semántica de
+leases/reintentos y probes de producción.

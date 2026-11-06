@@ -120,6 +120,10 @@ class TestVault(_GatewayCase):
         with self.assertRaises(VaultError):
             self.vault.provision("short")
 
+    def test_overlong_password_rejected(self):
+        with self.assertRaises(VaultError):
+            self.vault.provision("x" * 2000)
+
     def test_rotate_requires_old_or_force(self):
         self.vault.provision("first password 123")
         with self.assertRaises(VaultError):

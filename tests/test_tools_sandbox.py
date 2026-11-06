@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import tools
 from tools import (
     ALLOWED_TOOLS,
     Toolbox,
@@ -48,6 +49,14 @@ class TestToolsSandbox(unittest.TestCase):
         r = self.tb.read_file("hello.txt")
         self.assertTrue(r["ok"], r)
         self.assertIn("rc-content", r["content"])
+
+    def test_read_file_rejects_oversized_file(self):
+        (self.ws / "big.txt").write_text("x" * 9)
+        with mock.patch.object(tools, "MAX_READ_FILE_BYTES", 8):
+            r = self.tb.read_file("big.txt")
+        self.assertFalse(r["ok"], r)
+        self.assertEqual(r["error"], "archivo_demasiado_grande")
+        self.assertEqual(r["limit"], 8)
 
     def test_path_traversal_blocked(self):
         with self.assertRaises(PermissionError):

@@ -22,6 +22,7 @@ from crypto import (
     ENC_ITERATIONS,
     LEGACY_ENC_ITERATIONS,
     MAX_ENC_ITERATIONS,
+    MAX_PASSWORD_CHARS,
     MIN_ENC_ITERATIONS,
     derive_key,
     encrypt_canary,
@@ -166,6 +167,10 @@ class Vault:
         password = (password or "").strip()
         if len(password) < 12:
             raise VaultError("password must be at least 12 characters")
+        if len(password) > MAX_PASSWORD_CHARS:
+            raise VaultError(
+                f"password must be at most {MAX_PASSWORD_CHARS} characters"
+            )
         if self.exists() and not force:
             raise VaultError("vault already exists; provide the current password to rotate")
         self._write_v2(password)

@@ -230,6 +230,14 @@ class AcpServer:
                 self._send(response)
         except Exception as exc:  # keep the reader loop alive
             print(f"acp: unhandled error: {exc}", file=sys.stderr)
+            if isinstance(message, dict):
+                message_id = message.get("id", _SENTINEL)
+            else:
+                message_id = _SENTINEL
+            if message_id is not _SENTINEL:
+                self._send(
+                    _error(message_id, INTERNAL_ERROR, "internal error")
+                )
 
     # ── dispatch ─────────────────────────────────────────────────────────────
     def handle_message(self, message: dict) -> list[dict]:

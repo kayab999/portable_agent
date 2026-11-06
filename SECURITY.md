@@ -83,6 +83,12 @@ Do not include real vault passwords, API tokens, or private documents.
   timeout on Linux/macOS. On Windows only the direct child is killed, so
   grandchildren may survive; this is a bounded convenience runner, not a
   cross-platform sandbox.
+- **Gateway errors are sanitized.** 5xx responses return a generic
+  `internal_error`; diagnostic detail is written to the local structured log
+  and is never reflected to the client.
+- **Reads and credentials are bounded.** `read_file` refuses files above 10
+  MiB, and vault passwords are capped at 1024 characters to avoid unbounded
+  PBKDF2 cost.
 - **Release evidence is generated.** CI blocks on critical-module mypy,
   `pip-audit -r requirements-dev.txt`, and high-confidence secret scanning of
   the working tree and git history, and publishes a deterministic CycloneDX

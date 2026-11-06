@@ -31,8 +31,8 @@ Unchecked items are explicitly out of scope for this release.
 ## Quality
 
 - [x] Unit + adversarial + audit + production E2E green (`./scripts/ci.sh`)
-- [x] 402 tests: 397 passing + 5 skipped (`pwsh` and `llama-server` binary
-  absent; branch coverage 65.5%)
+- [x] 407 tests: 402 passing + 5 skipped (`pwsh` and `llama-server` binary
+  absent; branch coverage 65.6%)
 - [x] Lint gate (`ruff` curated rules) at 0 findings
 - [x] Branch coverage with per-module floors (`scripts/check_coverage.py`)
 - [x] Import contracts: storage never imports transports; ACP never imports the

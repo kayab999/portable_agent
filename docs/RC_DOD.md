@@ -171,7 +171,7 @@ Unchecked items are explicitly out of scope for this release.
 - [x] ADRs 001–008 recorded in `docs/ADRs/`
 - [x] `Known limitations` documents opt-in RAG/persistence, at-rest encryption,
   Windows verification and dead modules
-- [x] `MASK_GUIDE.md` says hash, not cryptographic signature
+- [x] Crypto review ADR (`docs/ADRs/008-crypto-review.md`)
 - [x] `INTEGRATION_GUIDE.md` says the linter is not mounted
 - [x] Honest redteam/README (no false seccomp claims)
 - [x] LICENSE: MIT (`LICENSE`)

@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import socket
 import ssl
 import subprocess
@@ -258,6 +259,59 @@ def _process_resource_preexec():
             pass
 
     return _limits
+
+
+def _run_bounded(
+    command: list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout: float,
+    preexec_fn=None,
+) -> tuple[int, str, str]:
+    """Run a subprocess with a hard timeout and kill its whole process group.
+
+    ``subprocess.run(timeout=...)`` only kills the direct child on POSIX; a
+    shell-less helper that forks children could survive. A new session lets us
+    terminate the group deterministically.
+
+    Windows has no ``killpg`` equivalent here: only the direct child is killed,
+    so grandchildren may survive. This is not a cross-platform sandbox.
+    """
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "cwd": cwd,
+        "env": env,
+    }
+    if preexec_fn is not None:
+        kwargs["preexec_fn"] = preexec_fn
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except OSError:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+        else:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    return process.returncode or 0, stdout or "", stderr or ""
 
 
 def unsafe_python_exec_enabled() -> bool:
@@ -860,12 +914,9 @@ class Toolbox:
             }
 
         try:
-            result = subprocess.run(
-                resolved_args,
-                capture_output=True,
-                text=True,
-                timeout=min(int(timeout), 60),
-                check=False,
+            command_args: list[str] = resolved_args or []
+            returncode, stdout, stderr = _run_bounded(
+                command_args,
                 cwd=str(self.workspace),
                 env={
                     "PATH": "/usr/bin:/bin",
@@ -873,23 +924,20 @@ class Toolbox:
                     "LANG": os.environ.get("LANG", "C.UTF-8"),
                     "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
                 },
+                timeout=min(int(timeout), 60),
                 preexec_fn=_process_resource_preexec(),
             )
-            ok = result.returncode == 0
+            ok = returncode == 0
             payload = {
                 "ok": ok,
-                "exit_code": result.returncode,
-                "stdout": (result.stdout or "")[:2000],
-                "stderr": (result.stderr or "")[:2000],
-                "truncated": len(result.stdout or "") > 2000
-                or len(result.stderr or "") > 2000,
+                "exit_code": returncode,
+                "stdout": stdout[:2000],
+                "stderr": stderr[:2000],
+                "truncated": len(stdout) > 2000 or len(stderr) > 2000,
             }
             if not ok:
                 payload["error"] = "exit_nonzero"
-                payload["message"] = (
-                    (result.stderr or "").strip()
-                    or f"exit {result.returncode}"
-                )
+                payload["message"] = stderr.strip() or f"exit {returncode}"
             return payload
         except subprocess.TimeoutExpired:
             return {
@@ -981,12 +1029,8 @@ class Toolbox:
 
             try:
                 py = os.environ.get("PYTHON", "python3")
-                result = subprocess.run(
+                returncode, stdout, stderr = _run_bounded(
                     [py, "-I", tmp_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=min(int(timeout), 60),
-                    check=False,
                     cwd=str(self.workspace),
                     env={
                         "PATH": "/usr/bin:/bin",
@@ -995,21 +1039,22 @@ class Toolbox:
                         "PYTHONNOUSERSITE": "1",
                         "LANG": os.environ.get("LANG", "C.UTF-8"),
                     },
+                    timeout=min(int(timeout), 60),
                     preexec_fn=_process_resource_preexec(),
                 )
-                out = (result.stdout or "")[:8000]
-                err = (result.stderr or "")[:2000]
-                ok = result.returncode == 0
+                out = stdout[:8000]
+                err = stderr[:2000]
+                ok = returncode == 0
                 payload = {
                     "ok": ok,
-                    "exit_code": result.returncode,
+                    "exit_code": returncode,
                     "stdout": out,
                     "stderr": err,
-                    "truncated": len(result.stdout or "") > 8000,
+                    "truncated": len(stdout) > 8000,
                 }
                 if not ok:
                     payload["error"] = "python_exit_nonzero"
-                    payload["message"] = err or f"exit {result.returncode}"
+                    payload["message"] = err or f"exit {returncode}"
                 self._log("python_exec", {"bytes": len(code)}, payload)
                 return payload
             finally:

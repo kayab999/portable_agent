@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from agent_runs import DB_PATH as RUNS_DB_PATH
 from agent_runs import create_run, finish_run, record_step, finish_step
 from agent_trace import emit_event
 from local_memory import retrieve
@@ -144,6 +145,75 @@ def parse_reflection(text: str) -> dict:
     if "fail" in lower or "error" in lower or "fracaso" in lower:
         success = False
     return {"success": success, "reflection": raw, "raw": raw}
+
+
+def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(value), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def evaluate_task_outcome(
+    final: str, tool_results: list[dict], *, objective_verified: bool = False
+) -> dict:
+    """Derive a task outcome from objective evidence, never from the model.
+
+    ``succeeded`` means *tool execution succeeded*: at least one tool result,
+    every tool result ok, and a non-empty final answer. It does **not** prove
+    that the user's objective was achieved (for example, a command can exit 0
+    while writing the wrong file). ``objective_success`` is therefore only true
+    when a caller supplies ``objective_verified=True`` from a task-specific
+    checker; no such checker is registered by default.
+
+    A text-only answer is ``unverified``; any failed tool result (or a missing
+    final answer after tool use) is ``unsatisfied``. The model reflection is
+    recorded separately and never changes this result.
+    """
+    evidence: list[dict] = [
+        {
+            "kind": "tool_result",
+            "tool": str(result.get("tool") or ""),
+            "ok": bool(result.get("ok")),
+            "error": str(result.get("error") or "")[:200],
+        }
+        for result in tool_results
+    ]
+    has_final = bool((final or "").strip())
+    has_tools = bool(tool_results)
+    all_ok = has_tools and all(bool(result.get("ok")) for result in tool_results)
+    tool_execution_success = all_ok
+    if all_ok and has_final:
+        outcome = "succeeded"
+    elif has_tools:
+        outcome = "unsatisfied"
+    else:
+        outcome = "unverified"
+    objective_success = bool(objective_verified and outcome == "succeeded")
+    if objective_success:
+        verification_level = "objective"
+    elif tool_execution_success:
+        verification_level = "tool_execution"
+    else:
+        verification_level = "none"
+    evidence.append({"kind": "final_answer", "present": has_final})
+    evidence.append(
+        {
+            "kind": "verification",
+            "level": verification_level,
+            "tool_execution_success": tool_execution_success,
+            "objective_verified": bool(objective_verified),
+            "objective_success": objective_success,
+        }
+    )
+    return {
+        "task_outcome": outcome,
+        "tool_execution_success": tool_execution_success,
+        "objective_success": objective_success,
+        "objective_verified": bool(objective_verified),
+        "verification_level": verification_level,
+        "evidence": evidence,
+    }
 
 
 def enqueue_experience(
@@ -294,6 +364,10 @@ def agent_step(
 
     Retrieval and persistence are opt-in for privacy; the default path touches
     no database.
+
+    ``max_tool_calls`` and ``max_runtime_seconds`` bound this single step only.
+    A multi-step task can spend a fresh budget on each call; use an outer
+    scheduler or an explicit task deadline if a whole-task limit is required.
     """
     toolbox = toolbox or get_toolbox()
     config = config or {}
@@ -309,6 +383,14 @@ def agent_step(
         or os.environ.get("BONSAI_AGENT_TRACING_ENABLED", "").lower()
         in ("1", "true", "yes", "on")
     )
+    runs_db = db_path or RUNS_DB_PATH
+    # Budgets are per step; a previous step must not poison later ones.
+    task_state.pop("budget_exhausted", None)
+    max_tool_calls = _bounded_int(config.get("max_tool_calls", 16), 16, 1, 64)
+    max_runtime_seconds = _bounded_int(
+        config.get("max_runtime_seconds", 300), 300, 5, 3600
+    )
+    deadline = time.monotonic() + max_runtime_seconds
 
     if runs_enabled and run_id is None:
         run_id = create_run(
@@ -316,6 +398,7 @@ def agent_step(
             persona=str(task_state.get("persona") or ""),
             model=model,
             config=config,
+            db_path=runs_db,
         )
     if run_id is not None:
         task_state["run_id"] = run_id
@@ -327,7 +410,9 @@ def agent_step(
     step_index = 0
     step_id = None
     if runs_enabled and run_id is not None:
-        step_id = record_step(run_id, step_index, status="running", messages=[])
+        step_id = record_step(
+            run_id, step_index, status="running", messages=[], db_path=runs_db
+        )
         if trace_enabled:
             emit_event(run_id, "step_started", name="agent_step", payload={"step": step_index})
 
@@ -356,7 +441,7 @@ def agent_step(
                 task_state["status"] = "blocked"
                 task_state["message"] = f"Blocked by hook: {decision.reason}"
                 if runs_enabled and run_id is not None:
-                    finish_run(run_id, status="failed", error=task_state["message"])
+                    finish_run(run_id, status="failed", error=task_state["message"], db_path=runs_db)
                     if trace_enabled:
                         emit_event(run_id, "run_failed", status="blocked", payload={"reason": decision.reason})
                 return task_state
@@ -368,7 +453,7 @@ def agent_step(
                 task_state["status"] = "error"
                 task_state["message"] = f"LLM unavailable after {max_retries} attempts: {e}"
                 if runs_enabled and run_id is not None:
-                    finish_run(run_id, status="failed", error=task_state["message"])
+                    finish_run(run_id, status="failed", error=task_state["message"], db_path=runs_db)
                     if trace_enabled:
                         emit_event(run_id, "run_failed", status="error", payload={"error": str(e)})
                 return task_state
@@ -379,6 +464,20 @@ def agent_step(
     all_results: list[dict] = []
 
     for _round in range(max_tool_rounds):
+        if len(all_results) >= max_tool_calls:
+            action_result = (
+                f"Tool-call budget exhausted ({max_tool_calls} calls); "
+                "answer is based on partial evidence."
+            )
+            task_state["budget_exhausted"] = "max_tool_calls"
+            break
+        if time.monotonic() >= deadline:
+            action_result = (
+                f"Runtime budget exhausted ({max_runtime_seconds}s); "
+                "answer is based on partial evidence."
+            )
+            task_state["budget_exhausted"] = "max_runtime_seconds"
+            break
         try:
             results, formatted = run_tool_cycle(
                 plan,
@@ -410,14 +509,14 @@ def agent_step(
         if not results:
             action_result = "No tool executed"
             if runs_enabled and step_id is not None:
-                finish_step(step_id, status="completed", model_output=plan)
+                finish_step(step_id, status="completed", model_output=plan, db_path=runs_db)
                 step_id = None
             break
 
         all_results.extend(results)
         action_result = formatted
         if runs_enabled and step_id is not None:
-            finish_step(step_id, status="running", tool_results=results, model_output=plan)
+            finish_step(step_id, status="running", tool_results=results, model_output=plan, db_path=runs_db)
             step_id = None
         if trace_enabled and run_id is not None:
             for r in results:
@@ -437,7 +536,7 @@ def agent_step(
         )
         if runs_enabled and run_id is not None and step_id is None:
             step_index += 1
-            step_id = record_step(run_id, step_index, status="running", messages=messages)
+            step_id = record_step(run_id, step_index, status="running", messages=messages, db_path=runs_db)
             if trace_enabled:
                 emit_event(run_id, "step_started", name="agent_step", payload={"step": step_index})
         try:
@@ -452,7 +551,7 @@ def agent_step(
             break
 
     if runs_enabled and step_id is not None:
-        finish_step(step_id, status="completed", model_output=plan)
+        finish_step(step_id, status="completed", model_output=plan, db_path=runs_db)
         step_id = None
 
     final = extract_final_answer(plan) or plan
@@ -474,17 +573,23 @@ def agent_step(
             "raw": "",
         }
 
-    objective_success = bool(all_results) and all(
-        bool(r.get("ok")) for r in all_results
-    ) and bool((final or "").strip())
-    if objective_success:
+    verification = evaluate_task_outcome(final, all_results)
+    if task_state.get("budget_exhausted"):
+        # A partially executed plan is never a verified success, even if the
+        # model produced a confident final answer.
+        verification = evaluate_task_outcome("", all_results)
+        verification["budget_exhausted"] = task_state["budget_exhausted"]
+    if verification["task_outcome"] == "succeeded":
         task_state["done"] = True
-    task_state["task_outcome"] = (
-        "succeeded"
-        if objective_success
-        else "unsatisfied" if all_results
-        else "unverified"
-    )
+    else:
+        # A later unverified/failed step must not inherit an earlier success.
+        task_state["done"] = False
+    task_state["task_outcome"] = verification["task_outcome"]
+    task_state["tool_execution_success"] = verification["tool_execution_success"]
+    task_state["objective_success"] = verification["objective_success"]
+    task_state["objective_verified"] = verification["objective_verified"]
+    task_state["verification_level"] = verification["verification_level"]
+    task_state["evidence"] = verification["evidence"]
     task_state["model_reflection_success"] = ref_parsed["success"]
 
     experience = {
@@ -495,6 +600,19 @@ def agent_step(
         "reflection": ref_parsed["reflection"],
         "success": ref_parsed["success"],
         "task_outcome": task_state["task_outcome"],
+        "provenance": {
+            "category": (
+                "verified_result"
+                if verification["objective_success"]
+                else "tool_observation"
+                if verification["tool_execution_success"]
+                else "model_assertion"
+            ),
+            "model": model,
+            "task_outcome": task_state["task_outcome"],
+            "verification_level": verification["verification_level"],
+            "objective_success": verification["objective_success"],
+        },
         "tool_results": [
             {"tool": r.get("tool"), "ok": r.get("ok")} for r in all_results
         ],
@@ -508,7 +626,14 @@ def agent_step(
                 pass
 
     if runs_enabled and run_id is not None:
-        finish_run(run_id, status="completed", final_answer=final)
+        finish_run(
+            run_id,
+            status="completed",
+            final_answer=final,
+            task_outcome=task_state["task_outcome"],
+            evidence=verification["evidence"],
+            db_path=runs_db,
+        )
         if trace_enabled:
             emit_event(run_id, "run_completed", payload={"steps": len(all_results)})
 
@@ -542,6 +667,9 @@ def interactive_react(
     """
     Multi-turn ReAct for chat UIs/CLI.
     Returns (final_text, updated_messages, tool_results_flat).
+
+    ``max_tool_calls`` and ``max_runtime_seconds`` bound this invocation only,
+    not a longer conversation or an outer task.
     """
     toolbox = toolbox or get_toolbox()
     config = config or {}
@@ -557,11 +685,19 @@ def interactive_react(
         or os.environ.get("BONSAI_AGENT_TRACING_ENABLED", "").lower()
         in ("1", "true", "yes", "on")
     )
+    runs_db = RUNS_DB_PATH
+    max_tool_calls = _bounded_int(config.get("max_tool_calls", 16), 16, 1, 64)
+    max_runtime_seconds = _bounded_int(
+        config.get("max_runtime_seconds", 300), 300, 5, 3600
+    )
+    deadline = time.monotonic() + max_runtime_seconds
+    budget_exhausted = ""
     if runs_enabled and run_id is None:
         run_id = create_run(
             goal=str(messages[-1].get("content", "") if messages else user_input)[:2000],
             model=model,
             config=config,
+            db_path=runs_db,
         )
 
     messages = list(messages)
@@ -571,6 +707,12 @@ def interactive_react(
     step_id = None
 
     for _ in range(max_iterations):
+        if len(tool_results_flat) >= max_tool_calls:
+            budget_exhausted = f"max_tool_calls={max_tool_calls}"
+            break
+        if time.monotonic() >= deadline:
+            budget_exhausted = f"max_runtime_seconds={max_runtime_seconds}"
+            break
         if hooks is not None:
             decision = hooks.run(
                 "pre_llm",
@@ -581,10 +723,10 @@ def interactive_react(
                 message = f"⛔ Bloqueado por hook: {decision.reason}"
                 messages.append({"role": "assistant", "content": message})
                 if runs_enabled and run_id is not None:
-                    finish_run(run_id, status="failed", error=message)
+                    finish_run(run_id, status="failed", error=message, db_path=runs_db)
                 return message, messages, tool_results_flat
         if runs_enabled and run_id is not None and step_id is None:
-            step_id = record_step(run_id, step_index, status="running", messages=messages)
+            step_id = record_step(run_id, step_index, status="running", messages=messages, db_path=runs_db)
             if trace_enabled:
                 emit_event(run_id, "step_started", name="interactive_react", payload={"step": step_index})
         response = model_client.chat_completion(model, messages)
@@ -603,7 +745,7 @@ def interactive_react(
         if results:
             tool_results_flat.extend(results)
             if runs_enabled and step_id is not None:
-                finish_step(step_id, status="running", tool_results=results, model_output=reply)
+                finish_step(step_id, status="running", tool_results=results, model_output=reply, db_path=runs_db)
                 step_id = None
             if trace_enabled and run_id is not None:
                 for r in results:
@@ -628,20 +770,45 @@ def interactive_react(
         messages.append({"role": "assistant", "content": answer})
         if runs_enabled and run_id is not None:
             if step_id is not None:
-                finish_step(step_id, status="completed", model_output=answer)
-            finish_run(run_id, status="completed", final_answer=answer)
+                finish_step(step_id, status="completed", model_output=answer, db_path=runs_db)
+            verification = evaluate_task_outcome(answer, tool_results_flat)
+            finish_run(
+                run_id,
+                status="completed",
+                final_answer=answer,
+                task_outcome=verification["task_outcome"],
+                evidence=verification["evidence"],
+                db_path=runs_db,
+            )
             if trace_enabled:
                 emit_event(run_id, "run_completed", payload={"steps": len(tool_results_flat)})
         return answer, messages, tool_results_flat
 
+    limit_message = (
+        f"⚠️ Bonsai: presupuesto de ejecución agotado ({budget_exhausted})."
+        if budget_exhausted
+        else "⚠️ Bonsai: límite de iteraciones alcanzado."
+    )
     messages.append(
         {
             "role": "assistant",
-            "content": "⚠️ Bonsai: límite de iteraciones alcanzado.",
+            "content": limit_message,
         }
     )
     if runs_enabled and run_id is not None:
         if step_id is not None:
-            finish_step(step_id, status="failed", error="iteration limit")
-        finish_run(run_id, status="failed", error="iteration limit")
+            finish_step(step_id, status="failed", error="iteration limit", db_path=runs_db)
+        verification = evaluate_task_outcome("", tool_results_flat)
+        finish_run(
+            run_id,
+            status="failed",
+            error=(
+                f"budget exhausted ({budget_exhausted})"
+                if budget_exhausted
+                else "iteration limit"
+            ),
+            task_outcome=verification["task_outcome"],
+            evidence=verification["evidence"],
+            db_path=runs_db,
+        )
     return messages[-1]["content"], messages, tool_results_flat

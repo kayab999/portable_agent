@@ -33,6 +33,8 @@ KNOWN_KEYS = frozenset(
         "yubikey_auto",
         "llm_port_offset",
         "max_iterations",
+        "max_tool_calls",
+        "max_runtime_seconds",
         "knowledge_db_enabled",
         "knowledge_context_enabled",
         "agent_runs_enabled",
@@ -105,6 +107,18 @@ def validate_config(config: dict) -> dict:
             errors.append("max_iterations must be between 1 and 8")
     except (TypeError, ValueError):
         errors.append("max_iterations must be an integer")
+
+    # These bound one agent step/invocation, not a whole multi-step task.
+    for key, default, upper in (
+        ("max_tool_calls", 16, 64),
+        ("max_runtime_seconds", 300, 3600),
+    ):
+        value = config.get(key, default)
+        try:
+            if not 1 <= int(value) <= upper:
+                errors.append(f"{key} must be between 1 and {upper}")
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be an integer")
 
     for key in ("mcp_servers", "plugin_paths"):
         value = config.get(key, [])

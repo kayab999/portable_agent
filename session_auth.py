@@ -194,6 +194,9 @@ class Vault:
         if not password or not self.owner_lock.is_file():
             return False
         meta = self._read_metadata()
+        if meta is None:
+            # Unreadable owner.lock: fail closed, no legacy fallback.
+            return False
         if self._is_v2(meta):
             # Never fall back to legacy files when v2 fields are present:
             # that would allow a downgrade to the weaker legacy format.
@@ -206,9 +209,6 @@ class Vault:
                 return verify_canary(meta["canary"], key)
             except (ValueError, TypeError, KeyError):
                 return False
-        if meta is None:
-            # Unreadable owner.lock: fail closed, no legacy fallback.
-            return False
         return self._verify_legacy(password)
 
 

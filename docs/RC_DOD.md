@@ -31,11 +31,16 @@ Unchecked items are explicitly out of scope for this release.
 ## Quality
 
 - [x] Unit + adversarial + audit + production E2E green (`./scripts/ci.sh`)
-- [x] 295 tests: 294 passing + 1 skipped (`pwsh` absent)
+- [x] 402 tests: 397 passing + 5 skipped (`pwsh` and `llama-server` binary
+  absent; branch coverage 65.5%)
 - [x] Lint gate (`ruff` curated rules) at 0 findings
 - [x] Branch coverage with per-module floors (`scripts/check_coverage.py`)
 - [x] Import contracts: storage never imports transports; ACP never imports the
-  HTTP gateway (`pyproject.toml`, optional `lint-imports`)
+  HTTP gateway (`tests/test_import_contracts.py`)
+- [x] CI gates: blocking critical-module mypy, `pip-audit -r`, secret scan of
+  tree and history, and deterministic SBOM artifact
+  (`.github/workflows/ci.yml`, `scripts/secret_scan.py`,
+  `scripts/generate_sbom.py`)
 - [x] Shared composition root and model transport are covered, including
   fail-closed plugin/MCP wiring (`tests/test_runtime.py`)
 - [x] CI matrix: Linux Python 3.11.4–3.13, Windows PowerShell launcher job and an
@@ -100,6 +105,16 @@ Unchecked items are explicitly out of scope for this release.
   (`tests/test_auth_fail_closed.py`)
 - [x] Download supply chain: pinned model SHA-256 and binary release digest
   (`tests/test_setup_download.py`, `tests/test_runtime_core.py`)
+- [x] Archive extraction is member-by-member with traversal, absolute path,
+  symlink, hardlink, device, reserved-name, duplicate and size/count limits
+  (`tests/test_runtime_core.py`)
+- [x] Task success is evidence-based (`succeeded`/`unsatisfied`/`unverified`);
+  `succeeded` is tool-execution success, `objective_success` requires an
+  explicit verifier, and model reflection cannot mark a failed run as done
+  (`tests/test_agent_loop.py`, `tests/test_agent_runs.py`)
+- [x] Execution budgets: `max_tool_calls` and `max_runtime_seconds`, scoped per
+  step/invocation rather than per task
+  (`tests/test_agent_loop.py`, `tests/test_config_schema.py`)
 - [x] PBKDF2-HMAC-SHA256 at 600k iterations; rc.3 100k vaults verify and migrate
   (`tests/test_auth_fail_closed.py`)
 - [x] IPv6 (`::1`) is rejected at startup instead of failing at bind
@@ -168,7 +183,7 @@ Unchecked items are explicitly out of scope for this release.
 - [x] `../CONTRIBUTING.md` with quality gates and non-negotiables
 - [x] `docs/RAG.md`, `docs/PERSISTENCE.md`, `docs/OPERATIONS.md`,
   `docs/ACP.md`, `docs/PLUGINS.md`, `docs/API.md`, `docs/TESTING.md`
-- [x] ADRs 001–008 recorded in `docs/ADRs/`
+- [x] ADRs 001–010 recorded in `docs/ADRs/`
 - [x] `Known limitations` documents opt-in RAG/persistence, at-rest encryption,
   Windows verification and dead modules
 - [x] Crypto review ADR (`docs/ADRs/008-crypto-review.md`)

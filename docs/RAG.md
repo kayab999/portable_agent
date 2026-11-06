@@ -121,3 +121,16 @@ Opening an older database automatically:
 
 The migration is covered by `tests/test_rag_store.py` and preserves searchable
 content.
+
+## Retrieval evaluation
+
+`scripts/evaluate_rag.py` builds a temporary index with the production
+`TFIDFIndex` and measures Recall@1/3/5, MRR and malformed-query resilience over
+a small Spanish/English corpus. It is a baseline, not a benchmark claim:
+
+```bash
+python scripts/evaluate_rag.py --output dist/rag_eval.json
+```
+
+CI publishes the JSON alongside the SBOM. `tests/test_rag_eval.py` fails if the
+default corpus drops below Recall@1 = 0.8 or MRR = 0.8.

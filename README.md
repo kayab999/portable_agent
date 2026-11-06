@@ -353,9 +353,9 @@ rejection), `/v1` auth, concurrent SQLite access, strict tool parsing, feature
 containment, AGENTS.md loading, Agent Skills parsing/discovery, MCP stdio
 dispatch, hooks and permission enforcement, plugin adapters, subagent tool
 restriction, ACP session/cancel flows, and production-mode E2E. Current count:
-**295 tests** (1 skipped when `pwsh` is absent), plus coverage floors,
-import contracts, web/CSP checks, RAG migration/relevance tests, experience
-lease/retry tests and production probes.
+**402 tests** (397 passing; 5 skipped when `pwsh` or the `llama-server` binary
+is absent), plus coverage floors, import contracts, web/CSP checks, RAG
+migration/relevance tests, experience lease/retry tests and production probes.
 
 ## License
 

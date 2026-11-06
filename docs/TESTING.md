@@ -37,41 +37,49 @@ binary and a tiny `.gguf` and skips cleanly otherwise.
 
 ## Import contracts
 
-`pyproject.toml` declares two architecture invariants:
+`tests/test_import_contracts.py` enforces the architecture invariants with the
+standard library (no extra package required):
 
 - storage (`local_memory`, `experience_store`, `maintenance`, `audit_worker`)
   must not import transports (`gateway`, `acp_server`, `launcher`);
 - `acp_server` must not import `gateway` (shared code lives in `model_client`
-  and `runtime`).
+  and `runtime`);
+- production modules must not import the legacy `agentportable`, `linter` or
+  `execution_loop` modules.
 
 ```bash
-lint-imports
+python -m unittest tests.test_import_contracts -v
 ```
-
-If import-linter is not installed, `scripts/ci.sh` reports the skip instead of
-failing; the dedicated CI job installs it.
 
 ## Type checking
 
 `pyproject.toml` carries a pragmatic mypy baseline (`check_untyped_defs`,
-missing imports ignored, legacy/archived trees excluded). It is a ratchet, not
-yet a strict-typing claim:
+missing imports ignored, legacy/archived trees excluded). Security-critical
+modules are blocking; the rest is a ratchet:
 
 ```bash
-mypy .
+python -m mypy --config-file pyproject.toml --follow-imports=skip \
+  crypto.py session_auth.py runtime_core.py permissions.py hooks.py \
+  mcp_client.py agent_runs.py agent_loop.py config_schema.py
+mypy .   # global ratchet, currently non-blocking
 ```
 
 When tightening a module, enable `disallow_untyped_defs` for that module in an
 override and keep the rest of the baseline unchanged.
 
-## Dependency and security audit
+## Dependency, secret and SBOM checks
 
 ```bash
-pip-audit
+python -m pip_audit -r requirements-dev.txt --progress-spinner off
+python scripts/secret_scan.py --history
+python scripts/generate_sbom.py --output dist/sbom.json
 bandit -r . -x .venv,archive,tests
 ```
 
-Runtime has no third-party dependencies, so `pip-audit` mainly covers dev tools.
+Runtime has no third-party dependencies, so `pip-audit` covers dev tools. The
+secret scanner looks for high-confidence credential prefixes in the working
+tree and in `git log -p` history, and never prints a full match. The SBOM is
+deterministic CycloneDX 1.5 JSON with build-only components.
 
 ## Property-based testing
 

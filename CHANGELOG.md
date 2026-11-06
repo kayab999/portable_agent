@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Consolidation hardening
+- **Archive extraction.** ZIP and TAR releases are extracted member by member
+  instead of `extractall`. Absolute paths, `..`, backslashes, drive letters,
+  Windows device names, duplicate/case-folded collisions, symlinks, hardlinks,
+  devices, encrypted ZIP members, excessive member counts and excessive
+  uncompressed size all fail closed. A failed extraction leaves no staging
+  directory behind.
+- **Evidence-based completion.** `agent_runs` now stores `task_outcome`
+  (`succeeded` / `unsatisfied` / `unverified`) and the evidence that justifies
+  it. `succeeded` means tool execution succeeded and a non-empty final answer
+  exists; it is not an objective-success claim. `objective_success` requires an
+  explicit task-specific verifier (`objective_verified=True`), and none are
+  registered by default. `done` requires successful tool results plus a final
+  answer; model reflection is advisory only and stored separately. Run status
+  and task outcome are independent, and terminal transitions are guarded.
+- **Run recovery.** `recover_stale_runs()` marks abandoned `running` runs as
+  failed after a crash, and run/step writes honor the caller's `db_path`.
+- **Execution budgets.** New `max_tool_calls` (default 16) and
+  `max_runtime_seconds` (default 300) config keys stop runaway loops within a
+  single step/invocation. They are not a whole-task deadline; a
+  budget-exhausted run can never be reported as verified success.
+- **MCP capability boundary.** Tool names are validated, per-server namespaced
+  collisions fail closed, duplicate server names are rejected, and an explicit
+  empty `tools_allow` still wins over `allow_all_tools`.
+- **CI and release evidence.** Critical-module mypy, `pip-audit -r`, secret
+  scanning (tree and git history) and a deterministic CycloneDX SBOM are now
+  blocking/published in CI; GitHub Actions are pinned by commit SHA.
+- **Architecture contracts.** Replaced the invalid single-module
+  `import-linter` config with stdlib AST tests covering legacy isolation,
+  storage→transport and ACP→gateway boundaries. Renumbered duplicate ADR 007
+  and 008 files to 009 and 010.
+- **Experience provenance.** Persisted experiences now record whether they come
+  from a tool observation, a model assertion, or a verified result.
+
 ## 1.0.0-rc.5
 
 ### RAG, persistence and operational completion

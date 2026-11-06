@@ -14,6 +14,7 @@ from mcp_client import (
     MCPError,
     MCPManager,
     MCPServer,
+    MCPTool,
 )
 from permissions import PermissionPolicy
 from tool_registry import ToolRegistry
@@ -206,6 +207,87 @@ class TestMCPManager(unittest.TestCase):
                 )
                 self.assertEqual(manager.servers, {})
                 self.assertTrue(manager.errors)
+
+    def test_duplicate_server_names_are_rejected(self):
+        manager = MCPManager.from_config([_config(), _config()])
+        self.assertEqual(len(manager.servers), 1)
+        self.assertTrue(manager.errors)
+        self.assertIn("duplicate", manager.errors[0]["error"])
+
+    def test_allowlist_rejects_control_characters_and_long_names(self):
+        for value in (["echo\n"], ["x" * 129], ["/"], ["\x00"]):
+            with self.subTest(value=value):
+                manager = MCPManager.from_config(
+                    [_config(tools_allow=value)]
+                )
+                self.assertEqual(manager.servers, {})
+                self.assertTrue(manager.errors)
+
+    def test_allow_all_with_explicit_empty_list_denies_all(self):
+        manager = MCPManager.from_config(
+            [_config(tools_allow=[], allow_all_tools=True)]
+        ).start_all()
+        self.addCleanup(manager.close)
+        self.assertEqual(manager.names(), frozenset())
+        self.assertIsNone(manager.servers["fake"].proc)
+
+    def test_namespace_collision_fails_closed(self):
+        server = MCPServer("fake", sys.executable, allow_all_tools=True)
+
+        def colliding(method, params=None, **kwargs):
+            if method == "tools/list":
+                return {
+                    "tools": [
+                        {"name": "a/b", "description": "one"},
+                        {"name": "a b", "description": "two"},
+                    ]
+                }
+            return {}
+
+        with patch.object(server, "_request", side_effect=colliding):
+            with self.assertRaises(MCPError):
+                server.list_tools()
+
+    def test_cross_server_namespace_collision_fails_closed(self):
+        shared = MCPTool(
+            server="a",
+            name="echo",
+            namespaced="mcp__shared__echo",
+            description="",
+        )
+        first = MCPServer("a", sys.executable, allow_all_tools=True)
+        second = MCPServer("b", sys.executable, allow_all_tools=True)
+
+        def listing(server):
+            def _list():
+                server.tools = [shared]
+                return [shared]
+
+            return _list
+
+        with patch.object(first, "start"), patch.object(
+            first, "list_tools", side_effect=listing(first)
+        ), patch.object(second, "start"), patch.object(
+            second, "list_tools", side_effect=listing(second)
+        ):
+            manager = MCPManager([first, second]).start_all()
+        self.assertEqual(len(manager.servers), 1)
+        self.assertTrue(any("collision" in item["error"] for item in manager.errors))
+        self.assertIsNotNone(manager.resolve("mcp__shared__echo"))
+
+    def test_ambiguous_namespace_is_not_resolved(self):
+        first = MCPServer("a", sys.executable, allow_all_tools=True)
+        second = MCPServer("b", sys.executable, allow_all_tools=True)
+        shared = MCPTool(
+            server="", name="echo", namespaced="mcp__shared__echo", description=""
+        )
+        first.tools = [shared]
+        second.tools = [shared]
+        manager = MCPManager([first, second])
+        self.assertIsNone(manager.resolve("mcp__shared__echo"))
+        self.assertEqual(
+            manager.call("mcp__shared__echo", {})["error"], "mcp_tool_not_found"
+        )
 
     def test_tool_pagination_is_bounded(self):
         server = MCPServer("fake", sys.executable)
